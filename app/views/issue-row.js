@@ -1,7 +1,7 @@
 /**
  * @import { SettableStatus } from '../protocol.js'
  */
-import { html } from 'lit-html';
+import { html, nothing } from 'lit-html';
 import { formatDateShort, formatDateValue } from '../utils/date-format.js';
 import { createIssueIdRenderer } from '../utils/issue-id-renderer.js';
 import { ISSUE_TYPES, typeLabel } from '../utils/issue-type.js';
@@ -44,12 +44,22 @@ export const ISSUE_ROW_COLUMNS = [
  * Create a reusable issue row renderer used by list and epics views.
  * Handles inline editing for title/assignee and selects for status/priority.
  *
+ * Optional hooks let a view repurpose the row without duplicating the cells:
+ * `onRowClick` overrides the default navigate-on-click; `getAriaExpanded` marks
+ * the row as a disclosure control; `leadingControl` prepends content to the ID
+ * cell (e.g. an expand caret); `titleSuffix` appends content after the title
+ * (e.g. an epic progress bar). Used by the epics view for epic-level rows.
+ *
  * @param {{
  *   navigate: (id: string) => void,
  *   onUpdate: (id: string, patch: { title?: string, assignee?: string, status?: SettableStatus, priority?: number, issue_type?: string }) => Promise<void>,
  *   requestRender: () => void,
  *   getSelectedId?: () => string | null,
- *   row_class?: string
+ *   row_class?: string,
+ *   onRowClick?: (id: string, ev: Event) => void,
+ *   getAriaExpanded?: (it: IssueRowData) => boolean | null,
+ *   leadingControl?: (it: IssueRowData) => unknown,
+ *   titleSuffix?: (it: IssueRowData) => unknown
  * }} options
  * @returns {(it: IssueRowData) => import('lit-html').TemplateResult<1>}
  */
@@ -59,6 +69,10 @@ export function createIssueRowRenderer(options) {
   const request_render = options.requestRender;
   const get_selected_id = options.getSelectedId || (() => null);
   const row_class = options.row_class || 'issue-row';
+  const on_row_click = options.onRowClick || ((id) => navigate(id));
+  const get_aria_expanded = options.getAriaExpanded || (() => null);
+  const leading_control = options.leadingControl || (() => nothing);
+  const title_suffix = options.titleSuffix || (() => nothing);
 
   /** @type {Set<string>} */
   const editing = new Set();
@@ -156,12 +170,12 @@ export function createIssueRowRenderer(options) {
    * @returns {(ev: Event) => void}
    */
   function makeRowClick(id) {
-    return (ev) => {
+    return (/** @type {Event} */ ev) => {
       const el = /** @type {HTMLElement|null} */ (ev.target);
       if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT')) {
         return;
       }
-      navigate(id);
+      on_row_click(id, ev);
     };
   }
 
@@ -173,13 +187,18 @@ export function createIssueRowRenderer(options) {
     const cur_prio = String(it.priority ?? 2);
     const cur_type = String(it.issue_type || '');
     const is_selected = get_selected_id() === it.id;
+    const expanded = get_aria_expanded(it);
+    const suffix = title_suffix(it);
     return html`<tr
       role="row"
       class="${row_class} ${is_selected ? 'selected' : ''}"
       data-issue-id=${it.id}
+      aria-expanded=${expanded === null ? nothing : String(expanded)}
       @click=${makeRowClick(it.id)}
     >
-      <td role="gridcell" class="mono">${createIssueIdRenderer(it.id)}</td>
+      <td role="gridcell" class="mono">
+        ${leading_control(it)}${createIssueIdRenderer(it.id)}
+      </td>
       <td role="gridcell">
         <select
           class="badge-select badge--type type-badge--${cur_type || 'neutral'}"
@@ -194,7 +213,13 @@ export function createIssueRowRenderer(options) {
           )}
         </select>
       </td>
-      <td role="gridcell">${editableText(it.id, 'title', it.title || '')}</td>
+      <td role="gridcell">
+        ${suffix === nothing
+          ? editableText(it.id, 'title', it.title || '')
+          : html`<span class="title-with-suffix"
+              >${editableText(it.id, 'title', it.title || '')}${suffix}</span
+            >`}
+      </td>
       <td role="gridcell">
         <select
           class="badge-select badge--status is-${cur_status}"

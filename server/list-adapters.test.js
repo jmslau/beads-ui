@@ -172,6 +172,44 @@ describe('list adapters for subscription types', () => {
     }
   });
 
+  test('epic flatten preserves priority and assignee', async () => {
+    // `bd epic status --json` nests a full issue under `epic`; the flatten must
+    // carry priority/assignee through so the epics table can show and sort them
+    // (without them, every epic renders Priority "Normal" / "Unassigned").
+    /** @type {import('vitest').Mock} */ (runBdJson).mockResolvedValue({
+      code: 0,
+      stdoutJson: [
+        {
+          epic: {
+            id: 'E-9',
+            title: 'With people',
+            status: 'open',
+            issue_type: 'epic',
+            priority: 0,
+            assignee: 'agent',
+            created_at: '2024-01-01T00:00:00.000Z',
+            updated_at: '2024-01-01T00:00:00.000Z',
+            closed_at: null
+          },
+          total_children: 3,
+          closed_children: 1,
+          eligible_for_close: false
+        }
+      ]
+    });
+
+    const res = await fetchListForSubscription({ type: 'epics' });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.items[0]).toMatchObject({
+        id: 'E-9',
+        priority: 0,
+        assignee: 'agent'
+      });
+    }
+  });
+
   test('issue-detail for an epic enriches dependents with real child timestamps', async () => {
     // `bd show <id> --json --include-dependents` returns dependents whose
     // created_at/updated_at are zeroed (Go's 0001-01-01). The real values are

@@ -190,6 +190,11 @@ export async function fetchListForSubscription(spec, options = {}) {
             title: e.title,
             status: e.status,
             issue_type: e.issue_type || 'epic',
+            // Preserve people fields so the epics table can show and sort them;
+            // without them every epic row would render Priority "Normal" and
+            // Assignee "Unassigned" (the issue-row renderer's defaults).
+            priority: e.priority,
+            assignee: e.assignee,
             created_at: e.created_at,
             updated_at: e.updated_at,
             closed_at: e.closed_at ?? null,
