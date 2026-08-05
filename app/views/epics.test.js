@@ -459,14 +459,127 @@ describe('views/epics', () => {
     // Default order follows priority ascending.
     expect(ids()).toEqual(['UI-51', 'UI-52', 'UI-53']);
 
+    // Scope to the child table: the epic-level header also carries a sortable
+    // "Updated" button, and it renders first in the DOM.
     const updatedBtn = /** @type {HTMLButtonElement} */ (
-      mount.querySelector('button.th-sort[data-sort-key="updated_at"]')
+      mount.querySelector(
+        '.epic-children button.th-sort[data-sort-key="updated_at"]'
+      )
     );
     updatedBtn.click();
     expect(ids()).toEqual(['UI-53', 'UI-51', 'UI-52']);
 
     updatedBtn.click();
     expect(ids()).toEqual(['UI-52', 'UI-51', 'UI-53']);
+  });
+
+  test('renders epic rows with the full issue column set', async () => {
+    const { mount, view } = createEpicsHarness([
+      {
+        id: 'UI-70',
+        title: 'Full columns',
+        issue_type: 'epic',
+        status: 'open',
+        priority: 1,
+        assignee: 'agent',
+        created_at: 100,
+        updated_at: 200
+      }
+    ]);
+    await view.load();
+
+    const row = mount.querySelector('tr.epic-parent-row');
+    expect(row).not.toBeNull();
+    // Same editable/select columns as the Issues tab, at the epic level.
+    expect(row?.querySelector('select.badge--type')).not.toBeNull();
+    expect(row?.querySelector('select.badge--status')).not.toBeNull();
+    expect(row?.querySelector('select.badge--priority')).not.toBeNull();
+  });
+
+  test('renders sortable epic-level column headers', async () => {
+    const { mount, view } = createEpicsHarness([
+      { id: 'UI-70', title: 'Epic', issue_type: 'epic' }
+    ]);
+    await view.load();
+
+    const head = mount.querySelector('.epics-head');
+    expect(head).not.toBeNull();
+    // The same columns marked sortable on the Issues tab are sortable here.
+    expect(
+      head?.querySelector('button.th-sort[data-sort-key="id"]')
+    ).not.toBeNull();
+    expect(
+      head?.querySelector('button.th-sort[data-sort-key="created_at"]')
+    ).not.toBeNull();
+    expect(
+      head?.querySelector('button.th-sort[data-sort-key="updated_at"]')
+    ).not.toBeNull();
+    // Full Issues column set (9 content columns) plus the trailing spacer, so
+    // the epic row aligns with the child table and the Issues tab.
+    expect(head?.querySelectorAll('thead th').length).toBe(10);
+  });
+
+  test('sorts epics by the epic-level ID header', async () => {
+    const { mount, view } = createEpicsHarness([
+      { id: 'UI-2', title: 'Two', issue_type: 'epic' },
+      { id: 'UI-10', title: 'Ten', issue_type: 'epic' },
+      { id: 'UI-1', title: 'One', issue_type: 'epic' }
+    ]);
+    await view.load();
+
+    // Default order tie-breaks on the raw id string: UI-1 < UI-10 < UI-2.
+    expect(visibleEpicIds(mount)).toEqual(['UI-1', 'UI-10', 'UI-2']);
+
+    const idBtn = /** @type {HTMLButtonElement} */ (
+      mount.querySelector('.epics-head button.th-sort[data-sort-key="id"]')
+    );
+    idBtn.click();
+    // Natural (numeric-aware) id ascending: UI-2 sorts before UI-10.
+    expect(visibleEpicIds(mount)).toEqual(['UI-1', 'UI-2', 'UI-10']);
+
+    idBtn.click();
+    expect(visibleEpicIds(mount)).toEqual(['UI-10', 'UI-2', 'UI-1']);
+  });
+
+  test('sorts epics by the epic-level Created header', async () => {
+    // Priorities make the default order (priority asc → created asc) differ
+    // from created-only ascending, so the sort click is observable.
+    const { mount, view } = createEpicsHarness([
+      {
+        id: 'UI-1',
+        title: 'A',
+        issue_type: 'epic',
+        priority: 0,
+        created_at: 300
+      },
+      {
+        id: 'UI-2',
+        title: 'B',
+        issue_type: 'epic',
+        priority: 1,
+        created_at: 100
+      },
+      {
+        id: 'UI-3',
+        title: 'C',
+        issue_type: 'epic',
+        priority: 2,
+        created_at: 200
+      }
+    ]);
+    await view.load();
+
+    // Default follows priority ascending.
+    expect(visibleEpicIds(mount)).toEqual(['UI-1', 'UI-2', 'UI-3']);
+
+    const createdBtn = /** @type {HTMLButtonElement} */ (
+      mount.querySelector(
+        '.epics-head button.th-sort[data-sort-key="created_at"]'
+      )
+    );
+    createdBtn.click();
+    // Created ascending: 100, 200, 300.
+    expect(visibleEpicIds(mount)).toEqual(['UI-2', 'UI-3', 'UI-1']);
   });
 
   test('clicking inputs/selects inside a row does not navigate', async () => {

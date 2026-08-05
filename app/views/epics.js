@@ -5,7 +5,6 @@ import {
   compareByKey,
   nextSortState
 } from '../data/sort.js';
-import { createIssueIdRenderer } from '../utils/issue-id-renderer.js';
 import { createColumnResizer } from './column-resize.js';
 import { ISSUE_ROW_COLUMNS, createIssueRowRenderer } from './issue-row.js';
 
@@ -61,10 +60,14 @@ export function createEpicsView(
   const loading = new Set();
   /** @type {Map<string, () => Promise<void>>} */
   const epic_unsubs = new Map();
-  // Sort selection is shared across every expanded group, so a header click
-  // sorts all groups' children the same way (and the arrow shows in each).
+  // Two independent sort selections. The epic-level state orders the epics
+  // themselves (the top header, mirroring the Issues tab); the child state is
+  // shared across every expanded group so a child header click sorts all
+  // groups' children the same way (and the arrow shows in each).
   /** @type {SortState} */
-  let sort_state = { key: null, dir: 'asc' };
+  let epic_sort_state = { key: null, dir: 'asc' };
+  /** @type {SortState} */
+  let child_sort_state = { key: null, dir: 'asc' };
   /** @type {Map<string, () => Promise<void>>} */
   const search_unsubs = new Map();
   let search_loading = false;
@@ -72,14 +75,52 @@ export function createEpicsView(
   const selectors = issue_stores ? createListSelectors(issue_stores) : null;
 
   /**
-   * Cycle a column header through ascending → descending → cleared.
+   * Cycle the epic-level column header through ascending → descending → cleared.
    *
    * @param {string} key
    */
-  const onSort = (key) => {
-    sort_state = nextSortState(sort_state, /** @type {any} */ (key));
+  const onSortEpics = (key) => {
+    epic_sort_state = nextSortState(epic_sort_state, /** @type {any} */ (key));
     doRender();
   };
+
+  /**
+   * Cycle a child column header through ascending → descending → cleared.
+   *
+   * @param {string} key
+   */
+  const onSortChild = (key) => {
+    child_sort_state = nextSortState(
+      child_sort_state,
+      /** @type {any} */ (key)
+    );
+    doRender();
+  };
+
+  /**
+   * Whether an epic renders expanded. During search every visible epic is shown
+   * open (its matching children are always displayed).
+   *
+   * @param {string} id
+   */
+  function isEpicOpen(id) {
+    return search_text.length > 0 || expanded.has(String(id));
+  }
+
+  /**
+   * Compact progress meter shown after an epic's title, in place of a tenth
+   * column so epic rows keep the exact Issues column set.
+   *
+   * @param {any} it - Epic row data carrying total/closed child counts.
+   */
+  function epicProgress(it) {
+    const total = Math.max(0, Number(it.total_children || 0));
+    const closed = Number(it.closed_children || 0);
+    return html`<span class="epic-progress">
+      <progress value=${closed} max=${Math.max(1, total)}></progress>
+      <span class="muted mono">${closed}/${total}</span>
+    </span>`;
+  }
   // Live re-render on pushes: recompute groups when stores change
   if (selectors) {
     selectors.subscribe(() => {
@@ -100,6 +141,24 @@ export function createEpicsView(
     requestRender: doRender,
     getSelectedId: () => null,
     row_class: 'epic-row'
+  });
+
+  // Row renderer for the epics themselves: the same columns as the Issues tab,
+  // plus a disclosure caret in the ID cell and the child-progress meter after
+  // the title. Clicking the row toggles expansion instead of navigating.
+  const renderEpicRow = createIssueRowRenderer({
+    navigate: (id) => goto_issue(id),
+    onUpdate: updateInline,
+    requestRender: doRender,
+    getSelectedId: () => null,
+    row_class: 'epic-parent-row epic-header',
+    onRowClick: (id) => void toggle(id),
+    getAriaExpanded: (it) => isEpicOpen(String(it.id)),
+    leadingControl: (it) =>
+      html`<span class="epic-caret" aria-hidden="true"
+        >${isEpicOpen(String(it.id)) ? '▾' : '▸'}</span
+      >`,
+    titleSuffix: (it) => epicProgress(it)
   });
 
   // Resizable columns shared by every epic table, persisted per view
@@ -300,8 +359,25 @@ export function createEpicsView(
     return 'No matching epics or issues.';
   }
 
+  /**
+   * Apply the epic-level column sort to visible entries. With no epic sort
+   * selected the groups keep the store's default order (priority asc → created
+   * asc).
+   *
+   * @param {{ group: any, children: IssueLite[] | null }[]} entries
+   */
+  function sortEntries(entries) {
+    if (!epic_sort_state.key) {
+      return entries;
+    }
+    const cmp = compareByKey(epic_sort_state.key, epic_sort_state.dir);
+    return entries
+      .slice()
+      .sort((a, b) => cmp(a.group.epic || {}, b.group.epic || {}));
+  }
+
   function template() {
-    const visible = visibleEntries();
+    const visible = sortEntries(visibleEntries());
     return html`
       <div class="panel__header">
         <input
@@ -317,7 +393,22 @@ export function createEpicsView(
           ? html`<div class="muted" style="padding:10px 12px;">
               ${emptyMessage()}
             </div>`
-          : visible.map((entry) => groupTemplate(entry.group, entry.children))}
+          : html`<div class="epics-block">
+              <table class="table epics-head">
+                ${column_resizer.colgroup()}
+                <thead>
+                  <tr>
+                    ${column_resizer.headerCells({
+                      state: epic_sort_state,
+                      onSort: onSortEpics
+                    })}
+                  </tr>
+                </thead>
+              </table>
+              ${visible.map((entry) =>
+                groupTemplate(entry.group, entry.children)
+              )}
+            </div>`}
       </div>
     `;
   }
@@ -325,7 +416,7 @@ export function createEpicsView(
   /**
    * @param {any} g
    * @param {IssueLite[] | null} [search_children] - Rows to show while
-   *   searching; `null` renders the epic's own children on expand.
+   * searching; `null` renders the epic's own children on expand.
    */
   function groupTemplate(g, search_children = null) {
     const epic = g.epic || {};
@@ -333,43 +424,35 @@ export function createEpicsView(
     // Search hits are always shown, expanded or not
     const is_open = search_children !== null || expanded.has(id);
     // Compose children (search hits or the epic's own children). A selected
-    // column sort overrides the default (priority asc → created asc) order.
+    // child column sort overrides the default (priority asc → created asc)
+    // order.
     const base_list =
       search_children !== null
         ? search_children
         : selectors
           ? selectors.selectEpicChildren(id)
           : [];
-    const list = sort_state.key
-      ? base_list.slice().sort(compareByKey(sort_state.key, sort_state.dir))
+    const list = child_sort_state.key
+      ? base_list
+          .slice()
+          .sort(compareByKey(child_sort_state.key, child_sort_state.dir))
       : base_list;
     const is_loading = search_children === null && loading.has(id);
+    // The epic itself, rendered with the shared row renderer. Attach the group
+    // counters so the title-cell progress meter can read them.
+    const epic_row = {
+      ...epic,
+      total_children: g.total_children,
+      closed_children: g.closed_children
+    };
     return html`
       <div class="epic-group" data-epic-id=${id}>
-        <div
-          class="epic-header"
-          @click=${() => toggle(id)}
-          role="button"
-          tabindex="0"
-          aria-expanded=${is_open}
-        >
-          ${createIssueIdRenderer(id, { class_name: 'mono' })}
-          <span class="text-truncate" style="margin-left:8px"
-            >${epic.title || '(no title)'}</span
-          >
-          <span
-            class="epic-progress"
-            style="margin-left:auto; display:flex; align-items:center; gap:8px;"
-          >
-            <progress
-              value=${Number(g.closed_children || 0)}
-              max=${Math.max(1, Number(g.total_children || 0))}
-            ></progress>
-            <span class="muted mono"
-              >${g.closed_children}/${g.total_children}</span
-            >
-          </span>
-        </div>
+        <table class="table epic-parent-table">
+          ${column_resizer.colgroup()}
+          <tbody>
+            ${renderEpicRow(epic_row)}
+          </tbody>
+        </table>
         ${is_open
           ? html`<div class="epic-children">
               ${is_loading
@@ -381,8 +464,8 @@ export function createEpicsView(
                       <thead>
                         <tr>
                           ${column_resizer.headerCells({
-                            state: sort_state,
-                            onSort
+                            state: child_sort_state,
+                            onSort: onSortChild
                           })}
                         </tr>
                       </thead>
