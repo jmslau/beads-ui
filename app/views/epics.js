@@ -1,17 +1,33 @@
 import { html, render } from 'lit-html';
 import { createListSelectors } from '../data/list-selectors.js';
-import { compareByKey, nextSortState } from '../data/sort.js';
+import {
+  cmpPriorityThenCreated,
+  compareByKey,
+  nextSortState
+} from '../data/sort.js';
 import { createIssueIdRenderer } from '../utils/issue-id-renderer.js';
-import { sortableHeaderCell } from '../utils/sortable-header.js';
-import { createIssueRowRenderer } from './issue-row.js';
+import { createColumnResizer } from './column-resize.js';
+import { ISSUE_ROW_COLUMNS, createIssueRowRenderer } from './issue-row.js';
 
 /**
  * @import { SortState } from '../data/sort.js'
+ * @import { Status } from '../protocol.js'
  */
 
 /**
- * @typedef {{ id: string, title?: string, status?: string, priority?: number, issue_type?: string, assignee?: string, created_at?: number, updated_at?: number }} IssueLite
+ * @typedef {{ id: string, title?: string, status?: Status, priority?: number, issue_type?: string, assignee?: string, parent?: string, created_at?: number, updated_at?: number }} IssueLite
  */
+
+/**
+ * Lists backing the child issue search. Subscribed only while a search term is
+ * active; together they cover the same issues an expanded epic shows.
+ *
+ * @type {{ client_id: string, spec: { type: string } }[]}
+ */
+const SEARCH_LISTS = [
+  { client_id: 'epics:search-open', spec: { type: 'all-issues' } },
+  { client_id: 'epics:search-closed', spec: { type: 'closed-issues' } }
+];
 
 /**
  * Epics view (push-only):
@@ -20,6 +36,7 @@ import { createIssueRowRenderer } from './issue-row.js';
  * - On expand, subscribes to `detail:{id}` (issue-detail) for the epic.
  * - Renders children from the epic detail's `dependents` list.
  * - Provides inline edits via mutations; UI re-renders on push.
+ * - Search matches epics by id/title and their child issues by id/title.
  *
  * @param {HTMLElement} mount_element
  * @param {{ updateIssue: (input: any) => Promise<any> }} data
@@ -36,6 +53,8 @@ export function createEpicsView(
 ) {
   /** @type {any[]} */
   let groups = [];
+  /** @type {string} */
+  let search_text = loadSearch();
   /** @type {Set<string>} */
   const expanded = new Set();
   /** @type {Set<string>} */
@@ -46,6 +65,9 @@ export function createEpicsView(
   // sorts all groups' children the same way (and the arrow shows in each).
   /** @type {SortState} */
   let sort_state = { key: null, dir: 'asc' };
+  /** @type {Map<string, () => Promise<void>>} */
+  const search_unsubs = new Map();
+  let search_loading = false;
   // Centralized selection helpers
   const selectors = issue_stores ? createListSelectors(issue_stores) : null;
 
@@ -66,10 +88,7 @@ export function createEpicsView(
       doRender();
       // Auto-expand first epic when transitioning from empty to non-empty
       if (had_none && groups.length > 0) {
-        const first_id = String(groups[0].epic?.id || '');
-        if (first_id && !expanded.has(first_id)) {
-          void toggle(first_id);
-        }
+        void expandFirst();
       }
     });
   }
@@ -83,31 +102,248 @@ export function createEpicsView(
     row_class: 'epic-row'
   });
 
+  // Resizable columns shared by every epic table, persisted per view
+  const column_resizer = createColumnResizer({
+    mount_element,
+    storage_key: 'beads-ui.columns.epics',
+    columns: ISSUE_ROW_COLUMNS,
+    requestRender: doRender
+  });
+
   function doRender() {
     render(template(), mount_element);
   }
 
-  function template() {
-    if (!groups.length) {
-      return html`<div class="panel__header muted">No epics found.</div>`;
+  /**
+   * Read the persisted search term.
+   */
+  function loadSearch() {
+    try {
+      return window.localStorage.getItem('beads-ui.epics.search') || '';
+    } catch {
+      return '';
     }
-    return html`${groups.map((g) => groupTemplate(g))}`;
+  }
+
+  /**
+   * Event: search input.
+   *
+   * @param {Event} ev
+   */
+  function onSearchInput(ev) {
+    const input = /** @type {HTMLInputElement} */ (ev.currentTarget);
+    search_text = input.value;
+    try {
+      window.localStorage.setItem('beads-ui.epics.search', search_text);
+    } catch {
+      // Storage unavailable; the term stays in memory for this session.
+    }
+    doRender();
+    void syncSearchSubscriptions();
+  }
+
+  /**
+   * Subscribe to the issue lists backing child search while a term is active;
+   * release them when the search is cleared.
+   */
+  async function syncSearchSubscriptions() {
+    const wanted = search_text.length > 0;
+    if (!subscriptions || typeof subscriptions.subscribeList !== 'function') {
+      return;
+    }
+    if (wanted && search_unsubs.size === 0 && !search_loading) {
+      search_loading = true;
+      doRender();
+      for (const list of SEARCH_LISTS) {
+        try {
+          // Register the store first to avoid dropping the initial snapshot
+          if (issue_stores && /** @type {any} */ (issue_stores).register) {
+            /** @type {any} */ (issue_stores).register(
+              list.client_id,
+              list.spec
+            );
+          }
+          const unsub = await subscriptions.subscribeList(
+            list.client_id,
+            list.spec
+          );
+          search_unsubs.set(list.client_id, unsub);
+        } catch {
+          // ignore subscription failures; search falls back to epic matches
+        }
+      }
+      search_loading = false;
+      doRender();
+      if (!search_text) {
+        // Search was cleared while subscribing; release right away
+        await syncSearchSubscriptions();
+      }
+      return;
+    }
+    if (!wanted && search_unsubs.size > 0) {
+      const entries = Array.from(search_unsubs.entries());
+      search_unsubs.clear();
+      for (const [client_id, unsub] of entries) {
+        try {
+          await unsub();
+        } catch {
+          // ignore
+        }
+        try {
+          if (issue_stores && /** @type {any} */ (issue_stores).unregister) {
+            /** @type {any} */ (issue_stores).unregister(client_id);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  /**
+   * Child issues of every epic, keyed by parent id, from the search lists.
+   *
+   * @returns {Map<string, IssueLite[]>}
+   */
+  function childrenByParent() {
+    /** @type {Map<string, IssueLite[]>} */
+    const by_parent = new Map();
+    if (!issue_stores || typeof issue_stores.snapshotFor !== 'function') {
+      return by_parent;
+    }
+    /** @type {Set<string>} */
+    const seen = new Set();
+    for (const list of SEARCH_LISTS) {
+      const items = /** @type {IssueLite[]} */ (
+        issue_stores.snapshotFor(list.client_id) || []
+      );
+      for (const it of items) {
+        const parent = String(it.parent || '');
+        const id = String(it.id || '');
+        if (!parent || seen.has(id)) {
+          continue;
+        }
+        seen.add(id);
+        const bucket = by_parent.get(parent);
+        if (bucket) {
+          bucket.push(it);
+        } else {
+          by_parent.set(parent, [it]);
+        }
+      }
+    }
+    for (const bucket of by_parent.values()) {
+      bucket.sort(cmpPriorityThenCreated);
+    }
+    return by_parent;
+  }
+
+  /**
+   * Whether an id or title contains the needle.
+   *
+   * @param {{ id?: string, title?: string }} item
+   * @param {string} needle
+   */
+  function matchesNeedle(item, needle) {
+    const id = String(item.id || '').toLowerCase();
+    const title = String(item.title || '').toLowerCase();
+    return id.includes(needle) || title.includes(needle);
+  }
+
+  /**
+   * Epic groups to render. Without a search term every group renders its own
+   * children on expand. With one, a group is kept when the epic matches (all
+   * children shown) or when its children match (only those shown).
+   *
+   * @returns {{ group: any, children: IssueLite[] | null }[]}
+   */
+  function visibleEntries() {
+    if (!search_text) {
+      return groups.map((g) => ({ group: g, children: null }));
+    }
+    const needle = search_text.toLowerCase();
+    const by_parent = childrenByParent();
+    /** @type {{ group: any, children: IssueLite[] | null }[]} */
+    const entries = [];
+    for (const g of groups) {
+      const epic = g.epic || {};
+      const children = by_parent.get(String(epic.id || '')) || [];
+      if (matchesNeedle(epic, needle)) {
+        entries.push({ group: g, children });
+        continue;
+      }
+      const hits = children.filter((it) => matchesNeedle(it, needle));
+      if (hits.length > 0) {
+        entries.push({ group: g, children: hits });
+      }
+    }
+    return entries;
+  }
+
+  /**
+   * Groups matching the current search term.
+   */
+  function visibleGroups() {
+    return visibleEntries().map((entry) => entry.group);
+  }
+
+  /**
+   * Message shown when nothing is rendered.
+   */
+  function emptyMessage() {
+    if (groups.length === 0) {
+      return 'No epics found.';
+    }
+    if (search_loading) {
+      return 'Searching…';
+    }
+    return 'No matching epics or issues.';
+  }
+
+  function template() {
+    const visible = visibleEntries();
+    return html`
+      <div class="panel__header">
+        <input
+          type="search"
+          placeholder="Search…"
+          aria-label="Search epics and issues"
+          @input=${onSearchInput}
+          .value=${search_text}
+        />
+      </div>
+      <div class="panel__body" id="epics-list">
+        ${visible.length === 0
+          ? html`<div class="muted" style="padding:10px 12px;">
+              ${emptyMessage()}
+            </div>`
+          : visible.map((entry) => groupTemplate(entry.group, entry.children))}
+      </div>
+    `;
   }
 
   /**
    * @param {any} g
+   * @param {IssueLite[] | null} [search_children] - Rows to show while
+   *   searching; `null` renders the epic's own children on expand.
    */
-  function groupTemplate(g) {
+  function groupTemplate(g, search_children = null) {
     const epic = g.epic || {};
     const id = String(epic.id || '');
-    const is_open = expanded.has(id);
-    // Compose children via selectors. A selected column sort overrides the
-    // default (priority asc → created asc) order.
-    const base_list = selectors ? selectors.selectEpicChildren(id) : [];
+    // Search hits are always shown, expanded or not
+    const is_open = search_children !== null || expanded.has(id);
+    // Compose children (search hits or the epic's own children). A selected
+    // column sort overrides the default (priority asc → created asc) order.
+    const base_list =
+      search_children !== null
+        ? search_children
+        : selectors
+          ? selectors.selectEpicChildren(id)
+          : [];
     const list = sort_state.key
       ? base_list.slice().sort(compareByKey(sort_state.key, sort_state.dir))
       : base_list;
-    const is_loading = loading.has(id);
+    const is_loading = search_children === null && loading.has(id);
     return html`
       <div class="epic-group" data-epic-id=${id}>
         <div
@@ -141,40 +377,12 @@ export function createEpicsView(
                 : list.length === 0
                   ? html`<div class="muted">No issues found</div>`
                   : html`<table class="table">
-                      <colgroup>
-                        <col style="width: 100px" />
-                        <col style="width: 120px" />
-                        <col />
-                        <col style="width: 120px" />
-                        <col style="width: 160px" />
-                        <col style="width: 130px" />
-                        <col style="width: 130px" />
-                        <col style="width: 130px" />
-                      </colgroup>
+                      ${column_resizer.colgroup()}
                       <thead>
                         <tr>
-                          ${sortableHeaderCell({
-                            label: 'ID',
-                            sort_key: 'id',
-                            sort_state,
-                            on_sort: onSort
-                          })}
-                          <th>Type</th>
-                          <th>Title</th>
-                          <th>Status</th>
-                          <th>Assignee</th>
-                          <th>Priority</th>
-                          ${sortableHeaderCell({
-                            label: 'Created',
-                            sort_key: 'created_at',
-                            sort_state,
-                            on_sort: onSort
-                          })}
-                          ${sortableHeaderCell({
-                            label: 'Updated',
-                            sort_key: 'updated_at',
-                            sort_state,
-                            on_sort: onSort
+                          ${column_resizer.headerCells({
+                            state: sort_state,
+                            onSort
                           })}
                         </tr>
                       </thead>
@@ -303,22 +511,32 @@ export function createEpicsView(
     return next_groups;
   }
 
+  /** Expand the first epic on screen. Search hits are shown regardless. */
+  async function expandFirst() {
+    if (search_text) {
+      return;
+    }
+    try {
+      const visible = visibleGroups();
+      if (visible.length === 0) {
+        return;
+      }
+      const first_id = String(visible[0].epic?.id || '');
+      if (first_id && !expanded.has(first_id)) {
+        // This will render and load children lazily
+        await toggle(first_id);
+      }
+    } catch {
+      // ignore auto-expand failures
+    }
+  }
+
   return {
     async load() {
       groups = buildGroupsFromSnapshot();
       doRender();
-      // Auto-expand first epic on screen
-      try {
-        if (groups.length > 0) {
-          const first_id = String(groups[0].epic?.id || '');
-          if (first_id && !expanded.has(first_id)) {
-            // This will render and load children lazily
-            await toggle(first_id);
-          }
-        }
-      } catch {
-        // ignore auto-expand failures
-      }
+      await syncSearchSubscriptions();
+      await expandFirst();
     }
   };
 }

@@ -1150,7 +1150,7 @@ input.inline-edit:focus {
   box-shadow: none;
 }
 
-#list-panel .panel__header input[type='search'] {
+.panel__header input[type='search'] {
   flex: 1;
 }
 
@@ -1290,7 +1290,8 @@ input.inline-edit:focus {
   border: 1px solid var(--border);
   border-radius: 6px;
   margin: 0px 12px;
-  overflow: hidden;
+  /* Scroll horizontally when resized columns exceed the panel width */
+  overflow: auto;
   background: var(--bg);
 }
 .epic-header {
@@ -1315,6 +1316,8 @@ input.inline-edit:focus {
 }
 .epic-children {
   padding: 8px 12px 12px;
+  /* Scroll horizontally when resized columns exceed the panel width */
+  overflow-x: auto;
 }
 .table {
   width: 100%;
@@ -1329,6 +1332,9 @@ input.inline-edit:focus {
   }
   /* Ensure form controls fill the cell */
   td {
+    /* Clip cell content instead of spilling into the next column */
+    overflow: hidden;
+
     input[type='text'],
     select {
       width: 100%;
@@ -1338,11 +1344,20 @@ input.inline-edit:focus {
       display: block;
       width: 100%;
     }
+    /* Truncate instead of spilling into the next column when narrowed */
+    .id-copy {
+      display: block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   }
   th {
     font-size: 12px;
     color: var(--muted);
     font-weight: 600;
+    /* Anchor for the absolutely positioned resize handle */
+    position: relative;
   }
   /* Compact, muted date cells that never wrap mid-value */
   td.date-col {
@@ -1350,11 +1365,14 @@ input.inline-edit:focus {
     white-space: nowrap;
     font-size: 12px;
   }
+  /* Trailing column that absorbs the space left by fixed column widths */
+  th.col-spacer,
+  td.col-spacer {
+    padding: 0;
+  }
 }
-/* Sortable column headers: the label is a button so it is keyboard-focusable */
-.table th.th-sortable {
-  padding: 0;
-}
+/* Sortable column headers: the label is a button so it is keyboard-focusable.
+   The resize handle sits alongside it, so the button is inset from the right. */
 .table th .th-sort {
   display: inline-flex;
   align-items: center;
@@ -1363,7 +1381,7 @@ input.inline-edit:focus {
   background: none;
   border: 0;
   margin: 0;
-  padding: var(--space-6) var(--space-8);
+  padding: 0;
   font: inherit;
   font-weight: 600;
   color: inherit;
@@ -1380,6 +1398,45 @@ input.inline-edit:focus {
   font-size: 10px;
   line-height: 1;
   opacity: 0.85;
+}
+
+/* Column resizing */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Straddle the column boundary; half sits over the next column */
+  right: calc(var(--space-4) / -2);
+  width: var(--space-4);
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  z-index: 1;
+}
+.col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 15%;
+  bottom: 15%;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: background 120ms ease;
+}
+.col-resizer:hover::after,
+.col-resizer:focus-visible::after,
+body.is-col-resizing .col-resizer:active::after {
+  width: 2px;
+  background: var(--link);
+}
+.col-resizer:focus-visible {
+  outline: none;
+}
+/* Keep the drag cursor and suppress selection for the whole drag */
+body.is-col-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .epic-row:hover {
   background: color-mix(in srgb, var(--control-bg) 55%, transparent);

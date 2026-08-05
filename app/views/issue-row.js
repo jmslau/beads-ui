@@ -12,10 +12,33 @@ import {
   statusLabel,
   statusOptions
 } from '../utils/status.js';
+import { columnSpacerCell } from './column-resize.js';
+
+/**
+ * @import { ColumnSpec } from './column-resize.js'
+ */
 
 /**
  * @typedef {{ id: string, title?: string, status?: string, priority?: number, issue_type?: string, assignee?: string, created_at?: number|string, updated_at?: number|string, dependency_count?: number, dependent_count?: number }} IssueRowData
  */
+
+/**
+ * Columns rendered by `createIssueRowRenderer`, in cell order. Used by the
+ * list and epics views to render matching, resizable headers.
+ *
+ * @type {ColumnSpec[]}
+ */
+export const ISSUE_ROW_COLUMNS = [
+  { key: 'id', label: 'ID', width: 100, sortable: true },
+  { key: 'type', label: 'Type', width: 120 },
+  { key: 'title', label: 'Title', width: 320, flex: true },
+  { key: 'status', label: 'Status', width: 120 },
+  { key: 'assignee', label: 'Assignee', width: 160 },
+  { key: 'priority', label: 'Priority', width: 130 },
+  { key: 'created_at', label: 'Created', width: 130, sortable: true },
+  { key: 'updated_at', label: 'Updated', width: 130, sortable: true },
+  { key: 'deps', label: 'Deps', width: 80 }
+];
 
 /**
  * Create a reusable issue row renderer used by list and epics views.
@@ -252,6 +275,7 @@ export function createIssueRowRenderer(options) {
             >`
           : ''}
       </td>
+      ${columnSpacerCell()}
     </tr>`;
   }
 

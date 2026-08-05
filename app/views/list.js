@@ -8,14 +8,14 @@ import { cmpClosedDesc, compareByKey, nextSortState } from '../data/sort.js';
 import { ISSUE_TYPES, typeLabel } from '../utils/issue-type.js';
 import { issueHashFor } from '../utils/issue-url.js';
 import { debug } from '../utils/logging.js';
-import { sortableHeaderCell } from '../utils/sortable-header.js';
 import {
   FILTERABLE_STATUSES,
   normalizeStatusFilters,
   sameStatusFilters,
   statusLabel
 } from '../utils/status.js';
-import { createIssueRowRenderer } from './issue-row.js';
+import { createColumnResizer } from './column-resize.js';
+import { ISSUE_ROW_COLUMNS, createIssueRowRenderer } from './issue-row.js';
 
 /**
  * @import { SortState } from '../data/sort.js'
@@ -112,6 +112,14 @@ export function createListView(
     requestRender: doRender,
     getSelectedId: () => selected_id,
     row_class: 'issue-row'
+  });
+
+  // Resizable columns, persisted per view
+  const column_resizer = createColumnResizer({
+    mount_element,
+    storage_key: 'beads-ui.columns.issues',
+    columns: ISSUE_ROW_COLUMNS,
+    requestRender: doRender
   });
 
   /**
@@ -389,48 +397,12 @@ export function createListView(
                 class="table"
                 role="grid"
                 aria-rowcount=${String(filtered.length)}
-                aria-colcount="9"
+                aria-colcount=${String(ISSUE_ROW_COLUMNS.length)}
               >
-                <colgroup>
-                  <col style="width: 100px" />
-                  <col style="width: 120px" />
-                  <col />
-                  <col style="width: 120px" />
-                  <col style="width: 160px" />
-                  <col style="width: 130px" />
-                  <col style="width: 130px" />
-                  <col style="width: 130px" />
-                  <col style="width: 80px" />
-                </colgroup>
+                ${column_resizer.colgroup()}
                 <thead>
                   <tr role="row">
-                    ${sortableHeaderCell({
-                      label: 'ID',
-                      sort_key: 'id',
-                      sort_state,
-                      on_sort: onSort,
-                      columnheader: true
-                    })}
-                    <th role="columnheader">Type</th>
-                    <th role="columnheader">Title</th>
-                    <th role="columnheader">Status</th>
-                    <th role="columnheader">Assignee</th>
-                    <th role="columnheader">Priority</th>
-                    ${sortableHeaderCell({
-                      label: 'Created',
-                      sort_key: 'created_at',
-                      sort_state,
-                      on_sort: onSort,
-                      columnheader: true
-                    })}
-                    ${sortableHeaderCell({
-                      label: 'Updated',
-                      sort_key: 'updated_at',
-                      sort_state,
-                      on_sort: onSort,
-                      columnheader: true
-                    })}
-                    <th role="columnheader">Deps</th>
+                    ${column_resizer.headerCells({ state: sort_state, onSort })}
                   </tr>
                 </thead>
                 <tbody role="rowgroup">
@@ -696,6 +668,7 @@ export function createListView(
   return {
     load,
     destroy() {
+      column_resizer.destroy();
       mount_element.replaceChildren();
       document.removeEventListener('click', clickOutsideHandler);
       if (unsubscribe) {
