@@ -43,6 +43,22 @@ function toggleStatus(label) {
 }
 
 /**
+ * Type into the issues-list search box and fire the input event.
+ *
+ * @param {string} value - Text to enter (empty clears the search).
+ */
+function typeSearch(value) {
+  const input = /** @type {HTMLInputElement} */ (
+    document
+      .querySelector('#list-root, .panel')
+      ?.querySelector('input[type="search"]') ||
+      document.querySelector('input[type="search"]')
+  );
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/**
  * The spec type of the most recent `tab:issues` subscription request.
  *
  * @returns {string}
@@ -228,6 +244,126 @@ describe('issues view — status filter model', () => {
     await settle();
 
     expect(lastIssuesSpecType()).toBe('in-progress-issues');
+  });
+
+  test('searching with no status filter widens to include closed issues', async () => {
+    // Regression: a search from the default (open-only) list could never match
+    // a closed issue, because the `all-issues` subscription excludes closed.
+    typeSearch('nmxr6');
+    await settle();
+
+    expect(lastIssuesSpecType()).toBe('all-issues-including-closed');
+
+    client._trigger('snapshot', {
+      type: 'snapshot',
+      id: 'tab:issues',
+      revision: 2,
+      issues: [
+        {
+          id: 'ENT-nmxr6.1',
+          title: 'Callback-aware outbound opener',
+          status: 'closed',
+          created_at: 40,
+          updated_at: 40,
+          closed_at: 50
+        },
+        {
+          id: 'OTHER-1',
+          title: 'unrelated open work',
+          status: 'open',
+          created_at: 41,
+          updated_at: 41
+        }
+      ]
+    });
+    await settle();
+
+    // The closed issue is found; the non-matching open row is filtered out.
+    expect(rowIds()).toEqual(['ENT-nmxr6.1']);
+  });
+
+  test('a Closed-inclusive status union widens to include closed issues', async () => {
+    // Regression: selecting Closed alongside another status resolved to the
+    // open-only `all-issues` list, so the Closed rows never arrived.
+    toggleStatus('Open');
+    await settle();
+    toggleStatus('Closed');
+    await settle();
+
+    expect(lastIssuesSpecType()).toBe('all-issues-including-closed');
+
+    client._trigger('snapshot', {
+      type: 'snapshot',
+      id: 'tab:issues',
+      revision: 2,
+      issues: [
+        {
+          id: 'OPEN-1',
+          title: 'open one',
+          status: 'open',
+          created_at: 10,
+          updated_at: 10
+        },
+        {
+          id: 'DONE-1',
+          title: 'closed one',
+          status: 'closed',
+          created_at: 20,
+          updated_at: 20,
+          closed_at: 25
+        },
+        {
+          id: 'PROG-1',
+          title: 'in progress one',
+          status: 'in_progress',
+          created_at: 30,
+          updated_at: 30
+        }
+      ]
+    });
+    await settle();
+
+    // Open + Closed selected: both show, the in-progress row is filtered out.
+    expect(rowIds().sort()).toEqual(['DONE-1', 'OPEN-1']);
+  });
+
+  test('searching within the lone Closed filter keeps the closed-issues list', async () => {
+    // Closed-only resolves to the dedicated (now uncapped) `closed-issues`
+    // list, so search over closed still works. Guards the block ordering:
+    // the single-status early return must win over the search widening.
+    toggleStatus('Closed');
+    await settle();
+    typeSearch('alpha');
+    await settle();
+
+    expect(lastIssuesSpecType()).toBe('closed-issues');
+
+    client._trigger('snapshot', {
+      type: 'snapshot',
+      id: 'tab:issues',
+      revision: 2,
+      issues: [
+        {
+          id: 'CL-1',
+          title: 'alpha done',
+          status: 'closed',
+          created_at: 20,
+          updated_at: 20,
+          closed_at: 25
+        },
+        {
+          id: 'CL-2',
+          title: 'beta done',
+          status: 'closed',
+          created_at: 21,
+          updated_at: 21,
+          closed_at: 26
+        }
+      ]
+    });
+    await settle();
+
+    expect(rowIds()).toEqual(['CL-1']);
   });
 
   test('in progress plus another status widens to all issues', async () => {

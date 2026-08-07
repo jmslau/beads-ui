@@ -17,6 +17,13 @@ export function mapSubscriptionToBdArgs(spec) {
       // `--limit 0` = unlimited. Without it, `bd list` caps at its default 50.
       return ['list', '--json', '--tree=false', '--limit', '0'];
     }
+    case 'all-issues-including-closed': {
+      // Like `all-issues` but with `--all`, so closed issues are included
+      // (bd list hides them by default). Backs the Issues search and the
+      // Closed-inclusive filter unions, which must be able to reach closed
+      // rows. `--limit 0` = unlimited.
+      return ['list', '--json', '--tree=false', '--all', '--limit', '0'];
+    }
     case 'epics': {
       return ['epic', 'status', '--json'];
     }
@@ -39,7 +46,8 @@ export function mapSubscriptionToBdArgs(spec) {
       ];
     }
     case 'ready-issues': {
-      return ['ready', '--limit', '1000', '--json'];
+      // `--limit 0` = unlimited. The old 1000 cap silently truncated (see #99).
+      return ['ready', '--limit', '0', '--json'];
     }
     case 'in-progress-issues': {
       // `--limit 0` = unlimited. Without it, `bd list` caps at its default 50.
@@ -54,6 +62,9 @@ export function mapSubscriptionToBdArgs(spec) {
       ];
     }
     case 'closed-issues': {
+      // `--limit 0` = unlimited. The old 1000 cap dropped closed issues past
+      // the first 1000 (see #99), making them unfindable in the epics/issues
+      // search once a project accumulated more than 1000 closed beads.
       return [
         'list',
         '--json',
@@ -61,7 +72,7 @@ export function mapSubscriptionToBdArgs(spec) {
         '--status',
         'closed',
         '--limit',
-        '1000'
+        '0'
       ];
     }
     case 'issue-detail': {

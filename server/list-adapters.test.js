@@ -18,6 +18,23 @@ describe('list adapters for subscription types', () => {
     expect(args).toEqual(['list', '--json', '--tree=false', '--limit', '0']);
   });
 
+  test('mapSubscriptionToBdArgs returns args for all-issues-including-closed', () => {
+    const args = mapSubscriptionToBdArgs({
+      type: 'all-issues-including-closed'
+    });
+    // `--all` makes bd list include closed issues (default hides them). This
+    // list backs the Issues search + Closed-inclusive filter unions, which must
+    // reach closed rows. `--limit 0` = unlimited.
+    expect(args).toEqual([
+      'list',
+      '--json',
+      '--tree=false',
+      '--all',
+      '--limit',
+      '0'
+    ]);
+  });
+
   test('mapSubscriptionToBdArgs returns args for epics', () => {
     const args = mapSubscriptionToBdArgs({ type: 'epics' });
     expect(args).toEqual(['epic', 'status', '--json']);
@@ -31,7 +48,8 @@ describe('list adapters for subscription types', () => {
 
   test('mapSubscriptionToBdArgs returns args for ready-issues', () => {
     const args = mapSubscriptionToBdArgs({ type: 'ready-issues' });
-    expect(args).toEqual(['ready', '--limit', '1000', '--json']);
+    // `--limit 0` = unlimited; the old 1000 cap silently truncated (see #99).
+    expect(args).toEqual(['ready', '--limit', '0', '--json']);
   });
 
   test('mapSubscriptionToBdArgs returns args for in-progress-issues', () => {
@@ -50,6 +68,8 @@ describe('list adapters for subscription types', () => {
 
   test('mapSubscriptionToBdArgs returns args for closed-issues', () => {
     const args = mapSubscriptionToBdArgs({ type: 'closed-issues' });
+    // `--limit 0` = unlimited; the old 1000 cap dropped closed issues past the
+    // first 1000 (see #99), making them unfindable in the epics/issues search.
     expect(args).toEqual([
       'list',
       '--json',
@@ -57,7 +77,7 @@ describe('list adapters for subscription types', () => {
       '--status',
       'closed',
       '--limit',
-      '1000'
+      '0'
     ]);
   });
 

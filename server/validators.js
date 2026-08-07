@@ -11,6 +11,7 @@
  */
 const SUBSCRIPTION_TYPES = new Set([
   'all-issues',
+  'all-issues-including-closed',
   'epics',
   'blocked-issues',
   'status-blocked-issues',
