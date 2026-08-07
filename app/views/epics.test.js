@@ -64,7 +64,7 @@ function createEpicsHarness(epics) {
    * @param {any[]} issues
    * @param {string} [client_id]
    */
-  function seedSearchList(issues, client_id = 'epics:search-open') {
+  function seedSearchList(issues, client_id = 'epics:search-all') {
     issue_stores.getStore(client_id).applyPush({
       type: 'snapshot',
       id: client_id,
@@ -1089,7 +1089,7 @@ describe('views/epics', () => {
           parent: 'UI-50'
         }
       ],
-      'epics:search-closed'
+      'epics:search-all'
     );
 
     await typeSearch(mount, 'spike');

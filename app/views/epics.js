@@ -19,13 +19,17 @@ import { ISSUE_ROW_COLUMNS, createIssueRowRenderer } from './issue-row.js';
 
 /**
  * Lists backing the child issue search. Subscribed only while a search term is
- * active; together they cover the same issues an expanded epic shows.
+ * active. A single `--all` list covers open and closed children in one query,
+ * so the epics search shares the exact "everything" set the Issues search uses
+ * (no separate open + capped-closed subscriptions to keep in sync).
  *
  * @type {{ client_id: string, spec: { type: string } }[]}
  */
 const SEARCH_LISTS = [
-  { client_id: 'epics:search-open', spec: { type: 'all-issues' } },
-  { client_id: 'epics:search-closed', spec: { type: 'closed-issues' } }
+  {
+    client_id: 'epics:search-all',
+    spec: { type: 'all-issues-including-closed' }
+  }
 ];
 
 /**

@@ -682,10 +682,17 @@ export function bootstrap(root_element) {
      * Compute subscription spec for Issues tab based on filters.
      *
      * A lone selection can be served by a dedicated server-side list; a union
-     * of several statuses cannot, so it falls back to all-issues and lets the
-     * list view narrow the rows client-side.
+     * of several statuses cannot, so it falls back to a list-everything query
+     * and lets the list view narrow the rows client-side.
      *
-     * @param {{ status?: unknown }} filters
+     * `all-issues` is open-only (bd list hides closed), so two cases must widen
+     * to `all-issues-including-closed` or closed rows never arrive: (1) an
+     * active search — a lookup by id/title should reach any status; (2) a
+     * status union that includes Closed alongside another status. The default,
+     * unsearched, no-status view stays on the open-only list so it is not
+     * flooded with closed issues.
+     *
+     * @param {{ status?: unknown, search?: unknown }} filters
      * @returns {{ type: string, params?: Record<string, string|number|boolean> }}
      */
     function computeIssuesSpec(filters) {
@@ -701,8 +708,16 @@ export function bootstrap(root_element) {
           return { type: 'closed-issues' };
         }
       }
+      const searching = String(filters?.search || '').trim().length > 0;
+      const closedInUnion = selected.includes('closed');
+      // Reaching closed rows: a search across any status, or a Closed-inclusive
+      // union. (A single stored status other than closed — e.g. only Open —
+      // deliberately does not surface closed even under search.)
+      if (closedInUnion || (searching && selected.length === 0)) {
+        return { type: 'all-issues-including-closed' };
+      }
       // No selection, a status without a dedicated list (e.g. open), or a
-      // union of several: fetch everything and filter locally.
+      // union of open statuses: the open-only list is enough to filter locally.
       return { type: 'all-issues' };
     }
 
