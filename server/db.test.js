@@ -166,4 +166,29 @@ describe('resolveWorkspaceDatabase', () => {
     expect(found.source).toBe('nearest');
     expect(found.exists).toBe(true);
   });
+
+  test('watches .beads directory when a leftover db shadows a Dolt backend', () => {
+    // Regression: a Dolt-backed workspace can retain a stale `.beads/*.db`
+    // from a previous SQLite backend. That frozen file must not be treated as
+    // the workspace database — its mtime never changes when Dolt commits, so a
+    // file-name-filtered watcher would never fire and the UI would show a
+    // permanently stale snapshot (newly created beads never appear).
+    const root = mkdtemp();
+    const nested = path.join(root, 'workspace', 'nested');
+    fs.mkdirSync(nested, { recursive: true });
+    const beads_dir = path.join(root, '.beads');
+    fs.mkdirSync(beads_dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(beads_dir, 'metadata.json'),
+      JSON.stringify({ backend: 'dolt', dolt_mode: 'embedded' })
+    );
+    // Stale leftover SQLite file that shadows the Dolt backend.
+    fs.writeFileSync(path.join(beads_dir, 'beads.db'), '');
+
+    const found = resolveWorkspaceDatabase({ cwd: nested, env: {} });
+
+    expect(found.path).toBe(beads_dir);
+    expect(found.source).toBe('metadata');
+    expect(found.exists).toBe(true);
+  });
 });

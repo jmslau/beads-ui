@@ -59,6 +59,23 @@ export function resolveDbPath(options = {}) {
  */
 export function resolveWorkspaceDatabase(options = {}) {
   const sqlite_db = resolveDbPath(options);
+
+  // A workspace can retain a stale `.beads/*.db` from a previous SQLite backend
+  // after migrating to a non-SQLite backend (for example Dolt). That frozen
+  // file must not be treated as the workspace database: its mtime never changes
+  // when the live backend commits, so a file-name-filtered watcher would never
+  // fire and the UI would show a permanently stale snapshot. When the workspace
+  // metadata declares a non-SQLite backend, watch the `.beads` directory
+  // instead so JSONL/last-touched/commit changes are actually detected.
+  if (sqlite_db.source === 'nearest') {
+    const beads_dir = path.dirname(sqlite_db.path);
+    const backend = readWorkspaceBackend(beads_dir);
+    if (backend && backend !== 'sqlite') {
+      return { path: beads_dir, source: 'metadata', exists: true };
+    }
+    return sqlite_db;
+  }
+
   if (sqlite_db.source !== 'home-default') {
     return sqlite_db;
   }
@@ -74,6 +91,29 @@ export function resolveWorkspaceDatabase(options = {}) {
   }
 
   return sqlite_db;
+}
+
+/**
+ * Read the declared storage backend from a workspace `.beads/metadata.json`.
+ *
+ * Returns the lowercased backend name (for example `dolt` or `sqlite`), or an
+ * empty string when no metadata exists or it declares no backend.
+ *
+ * @param {string} beads_dir - Path to the workspace `.beads` directory.
+ * @returns {string}
+ */
+export function readWorkspaceBackend(beads_dir) {
+  try {
+    const raw = fs.readFileSync(path.join(beads_dir, 'metadata.json'), 'utf8');
+    const meta = JSON.parse(raw);
+    if (!meta || typeof meta !== 'object') {
+      return '';
+    }
+    const backend = meta.backend ?? meta.database ?? '';
+    return typeof backend === 'string' ? backend.trim().toLowerCase() : '';
+  } catch {
+    return '';
+  }
 }
 
 /**
