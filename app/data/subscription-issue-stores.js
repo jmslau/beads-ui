@@ -19,10 +19,27 @@ export function createSubscriptionIssueStores() {
   const key_by_id = new Map();
   /** @type {Set<() => void>} */
   const listeners = new Set();
+  /** @type {Map<string, Set<() => void>>} */
+  const keyed_listeners = new Map();
   /** @type {Map<string, () => void>} */
   const store_unsubs = new Map();
 
-  function emit() {
+  /**
+   * @param {string} [changed_id]
+   */
+  function emit(changed_id) {
+    if (changed_id) {
+      const subset = keyed_listeners.get(changed_id);
+      if (subset && subset.size > 0) {
+        for (const fn of Array.from(subset)) {
+          try {
+            fn();
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
     for (const fn of Array.from(listeners)) {
       try {
         fn();
@@ -50,8 +67,24 @@ export function createSubscriptionIssueStores() {
     // snapshot with a lower revision (different server list).
     if (has_store && prev_key && next_key && prev_key !== next_key) {
       const prev_store = stores_by_id.get(client_id);
+      /** @type {any[]} */
+      let prev_items = [];
+      const preserve_on_search_widen =
+        (prev_key === 'all-issues' &&
+          next_key === 'all-issues-including-closed') ||
+        (prev_key === 'all-issues-including-closed' &&
+          next_key === 'all-issues');
       if (prev_store) {
         try {
+          if (preserve_on_search_widen) {
+            prev_items = prev_store
+              .snapshot()
+              .filter((it) =>
+                next_key === 'all-issues'
+                  ? String(it?.status || '') !== 'closed'
+                  : true
+              );
+          }
           prev_store.dispose();
         } catch {
           // ignore
@@ -67,14 +100,20 @@ export function createSubscriptionIssueStores() {
         store_unsubs.delete(client_id);
       }
       const new_store = createSubscriptionIssueStore(client_id, options);
+      if (
+        prev_items.length > 0 &&
+        typeof (/** @type {any} */ (new_store).seedInitialItems) === 'function'
+      ) {
+        /** @type {any} */ (new_store).seedInitialItems(prev_items);
+      }
       stores_by_id.set(client_id, new_store);
-      const off_new = new_store.subscribe(() => emit());
+      const off_new = new_store.subscribe(() => emit(client_id));
       store_unsubs.set(client_id, off_new);
     } else if (!has_store) {
       const store = createSubscriptionIssueStore(client_id, options);
       stores_by_id.set(client_id, store);
       // Fan out per-store events to global subscribers
-      const off = store.subscribe(() => emit());
+      const off = store.subscribe(() => emit(client_id));
       store_unsubs.set(client_id, off);
     }
     key_by_id.set(client_id, next_key);
@@ -121,11 +160,50 @@ export function createSubscriptionIssueStores() {
       return s ? /** @type {IssueLite[]} */ (s.snapshot().slice()) : [];
     },
     /**
+     * Return the store's sorted read-only snapshot directly without copying.
+     *
+     * @param {string} client_id
+     * @returns {readonly IssueLite[]}
+     */
+    readSnapshotFor(client_id) {
+      const s = stores_by_id.get(client_id);
+      return s ? /** @type {readonly IssueLite[]} */ (s.snapshot()) : [];
+    },
+    /**
      * @param {() => void} fn
      */
     subscribe(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);
+    },
+    /**
+     * Subscribe only to updates for a specific set of store client_ids.
+     *
+     * @param {string | string[]} client_ids
+     * @param {() => void} fn
+     * @returns {() => void}
+     */
+    subscribeKeys(client_ids, fn) {
+      const ids = Array.isArray(client_ids) ? client_ids : [client_ids];
+      for (const id of ids) {
+        let set = keyed_listeners.get(id);
+        if (!set) {
+          set = new Set();
+          keyed_listeners.set(id, set);
+        }
+        set.add(fn);
+      }
+      return () => {
+        for (const id of ids) {
+          const set = keyed_listeners.get(id);
+          if (set) {
+            set.delete(fn);
+            if (set.size === 0) {
+              keyed_listeners.delete(id);
+            }
+          }
+        }
+      };
     }
     // No recompute helpers in vNext; stores are updated directly via push
   };

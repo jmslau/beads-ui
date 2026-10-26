@@ -1,10 +1,52 @@
 import { spawn } from 'node:child_process';
 import { resolveDbPath } from './db.js';
 import { debug } from './logging.js';
+import { registry } from './subscriptions.js';
 
 const log = debug('bd');
 /** @type {Promise<void>} */
 let bd_run_queue = Promise.resolve();
+
+/** @type {Set<string>} */
+const READ_ONLY_SUBCOMMANDS = new Set([
+  'list',
+  'ready',
+  'blocked',
+  'epic',
+  'show',
+  '--version',
+  'version',
+  'help'
+]);
+
+/**
+ * Determine whether a bd CLI argument vector is a read-only query.
+ *
+ * @param {string[]} args
+ * @returns {boolean}
+ */
+function isReadOnlyBdCommand(args) {
+  let sub = '';
+  let next = '';
+  for (const a of args) {
+    if (a === '--sandbox') {
+      continue;
+    }
+    if (!sub) {
+      sub = a;
+    } else if (!next) {
+      next = a;
+      break;
+    }
+  }
+  if (READ_ONLY_SUBCOMMANDS.has(sub)) {
+    return true;
+  }
+  if (sub === 'comments' && next !== 'add') {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Get the git user name from git config.
@@ -95,6 +137,9 @@ function runBdUnlocked(args, options = {}) {
 
   /** @type {string[]} */
   const final_args = buildBdArgs(args);
+  if (!isReadOnlyBdCommand(args)) {
+    registry.bumpDbRevision();
+  }
 
   return new Promise((resolve) => {
     const child = spawn(bin, final_args, spawn_opts);

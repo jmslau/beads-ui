@@ -501,20 +501,31 @@ export function bootstrap(root_element) {
       sub_issue_stores
     );
     // Persist filter changes to localStorage
+    /** @type {string} */
+    let last_persisted_filters_json = '';
     store.subscribe((s) => {
       const data = {
         status: normalizeStatusFilters(s.filters.status),
         search: s.filters.search,
         type: typeof s.filters.type === 'string' ? s.filters.type : ''
       };
-      window.localStorage.setItem('beads-ui.filters', JSON.stringify(data));
+      const next_json = JSON.stringify(data);
+      if (next_json !== last_persisted_filters_json) {
+        last_persisted_filters_json = next_json;
+        window.localStorage.setItem('beads-ui.filters', next_json);
+      }
     });
     // Persist board preferences
+    /** @type {string} */
+    let last_persisted_board_json = '';
     store.subscribe((s) => {
-      window.localStorage.setItem(
-        'beads-ui.board',
-        JSON.stringify({ closed_filter: s.board.closed_filter })
-      );
+      const next_json = JSON.stringify({
+        closed_filter: s.board.closed_filter
+      });
+      if (next_json !== last_persisted_board_json) {
+        last_persisted_board_json = next_json;
+        window.localStorage.setItem('beads-ui.board', next_json);
+      }
     });
     void issues_view.load();
 
@@ -577,8 +588,15 @@ export function bootstrap(root_element) {
     // Open/close dialog based on selected_id (always dialog; no page variant)
     /** @type {null | (() => Promise<void>)} */
     let unsub_detail = null;
+    /** @type {string | null} */
+    let last_selected_id = initial_id || null;
     store.subscribe((s) => {
       const id = s.selected_id;
+      if (id === last_selected_id) {
+        return;
+      }
+      const prev_id = last_selected_id;
+      last_selected_id = id;
       if (id) {
         detail_mount.hidden = false;
         dialog.open(id);
@@ -603,6 +621,13 @@ export function bootstrap(root_element) {
               void unsub_detail().catch(() => {});
             }
             unsub_detail = unsub;
+            if (prev_id && prev_id !== id) {
+              try {
+                sub_issue_stores.unregister(`detail:${prev_id}`);
+              } catch {
+                // ignore
+              }
+            }
           })
           .catch((err) => {
             log('detail subscribe failed: %o', err);
@@ -621,6 +646,13 @@ export function bootstrap(root_element) {
         if (unsub_detail) {
           void unsub_detail().catch(() => {});
           unsub_detail = null;
+        }
+        if (prev_id) {
+          try {
+            sub_issue_stores.unregister(`detail:${prev_id}`);
+          } catch {
+            // ignore
+          }
         }
       }
     });
@@ -983,12 +1015,15 @@ export function bootstrap(root_element) {
       }
     }
 
+    /** @type {'issues'|'epics'|'board'|null} */
+    let last_rendered_view = null;
     /**
      * Manage route visibility and list subscriptions per view.
      *
      * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board', filters: any }} s
      */
     const onRouteChange = (s) => {
+      const view_changed = s.view !== last_rendered_view;
       if (issues_root && epics_root && board_root && detail_mount) {
         // Underlying route visibility is controlled only by selected view
         issues_root.hidden = s.view !== 'issues';
@@ -999,13 +1034,16 @@ export function bootstrap(root_element) {
       // Ensure subscriptions for the active tab before loading the view to
       // avoid empty initial renders due to racing list-delta.
       ensureTabSubscriptions(s);
-      if (!s.selected_id && s.view === 'epics') {
-        void epics_view.load();
+      if (view_changed) {
+        last_rendered_view = s.view;
+        if (!s.selected_id && s.view === 'epics') {
+          void epics_view.load();
+        }
+        if (!s.selected_id && s.view === 'board') {
+          void board_view.load();
+        }
+        window.localStorage.setItem('beads-ui.view', s.view);
       }
-      if (!s.selected_id && s.view === 'board') {
-        void board_view.load();
-      }
-      window.localStorage.setItem('beads-ui.view', s.view);
     };
     store.subscribe(onRouteChange);
     // Ensure initial state is reflected (fixes reload on #/epics)

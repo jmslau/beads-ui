@@ -50,6 +50,8 @@ export function cmpClosedDesc(a, b) {
   return ida < idb ? -1 : ida > idb ? 1 : 0;
 }
 
+const ZERO_TIME_MAX_MS = Date.UTC(2, 0, 1) - 1;
+
 /**
  * Whether an epoch-ms instant is the `bd` zero-time sentinel (Go's
  * `0001-01-01`). `bd show --include-dependents` returns dependent timestamps
@@ -59,7 +61,7 @@ export function cmpClosedDesc(a, b) {
  * @returns {boolean}
  */
 export function isZeroTime(ms) {
-  return Number.isFinite(ms) && new Date(ms).getUTCFullYear() <= 1;
+  return Number.isFinite(ms) && ms <= ZERO_TIME_MAX_MS;
 }
 
 /**
@@ -80,10 +82,48 @@ function toMs(value) {
   } else {
     return 0;
   }
-  if (!Number.isFinite(ms) || isZeroTime(ms)) {
+  if (!Number.isFinite(ms) || ms <= ZERO_TIME_MAX_MS) {
     return 0;
   }
   return ms;
+}
+
+/**
+ * @typedef {{ text: string, num: number | null }} IdChunk
+ */
+
+/** @type {Map<string, IdChunk[]>} */
+const ID_CHUNKS_CACHE = new Map();
+const MAX_ID_CACHE_SIZE = 20000;
+
+/**
+ * Parse an issue ID into alternating text and numeric chunks, cached by ID.
+ *
+ * @param {string} id
+ * @returns {IdChunk[]}
+ */
+function getParsedIdChunks(id) {
+  let cached = ID_CHUNKS_CACHE.get(id);
+  if (cached) {
+    return cached;
+  }
+  const raw = id.match(/\d+|\D+/g) || [];
+  /** @type {IdChunk[]} */
+  const chunks = [];
+  for (let i = 0; i < raw.length; i++) {
+    const part = raw[i];
+    const code = part.charCodeAt(0);
+    const is_num = code >= 48 && code <= 57;
+    chunks.push({
+      text: part,
+      num: is_num ? Number(part) : null
+    });
+  }
+  if (ID_CHUNKS_CACHE.size >= MAX_ID_CACHE_SIZE) {
+    ID_CHUNKS_CACHE.clear();
+  }
+  ID_CHUNKS_CACHE.set(id, chunks);
+  return chunks;
 }
 
 /**
@@ -96,21 +136,24 @@ function toMs(value) {
  * @returns {number} -1, 0 or 1
  */
 export function compareIdsNatural(a, b) {
-  const ax = String(a).match(/\d+|\D+/g) || [];
-  const bx = String(b).match(/\d+|\D+/g) || [];
+  const sa = String(a);
+  const sb = String(b);
+  if (sa === sb) {
+    return 0;
+  }
+  const ax = getParsedIdChunks(sa);
+  const bx = getParsedIdChunks(sb);
   const len = Math.min(ax.length, bx.length);
   for (let i = 0; i < len; i++) {
-    const as = ax[i];
-    const bs = bx[i];
-    const a_num = /^\d/.test(as);
-    const b_num = /^\d/.test(bs);
-    if (a_num && b_num) {
-      const diff = Number(as) - Number(bs);
+    const ac = ax[i];
+    const bc = bx[i];
+    if (ac.num !== null && bc.num !== null) {
+      const diff = ac.num - bc.num;
       if (diff !== 0) {
         return diff < 0 ? -1 : 1;
       }
-    } else if (as !== bs) {
-      return as < bs ? -1 : 1;
+    } else if (ac.text !== bc.text) {
+      return ac.text < bc.text ? -1 : 1;
     }
   }
   if (ax.length !== bx.length) {

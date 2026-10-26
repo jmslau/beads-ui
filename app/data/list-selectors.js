@@ -17,19 +17,27 @@ import { cmpClosedDesc, cmpPriorityThenCreated } from './sort.js';
  * Source of truth is per-subscription stores providing snapshots for a given
  * client id. Central issues store fallback has been removed.
  *
- * @param {{ snapshotFor?: (client_id: string) => IssueLite[], subscribe?: (fn: () => void) => () => void }} [issue_stores]
+ * @param {{ snapshotFor?: (client_id: string) => IssueLite[], readSnapshotFor?: (client_id: string) => readonly IssueLite[], subscribe?: (fn: () => void) => () => void, subscribeKeys?: (client_ids: string | string[], fn: () => void) => () => void }} [issue_stores]
  */
 export function createListSelectors(issue_stores = undefined) {
   // Sorting comparators are centralized in app/data/sort.js
 
   /**
-   * Get entities for a subscription id with Issues List sort (priority asc → created asc).
+   * Read items for a subscription id. When `readSnapshotFor` is available, the
+   * store already maintains `cmpPriorityThenCreated` order so we only copy the
+   * array without re-sorting.
    *
    * @param {string} client_id
    * @returns {IssueLite[]}
    */
   function selectIssuesFor(client_id) {
-    if (!issue_stores || typeof issue_stores.snapshotFor !== 'function') {
+    if (!issue_stores) {
+      return [];
+    }
+    if (typeof issue_stores.readSnapshotFor === 'function') {
+      return issue_stores.readSnapshotFor(client_id).slice();
+    }
+    if (typeof issue_stores.snapshotFor !== 'function') {
       return [];
     }
     return issue_stores
@@ -46,16 +54,23 @@ export function createListSelectors(issue_stores = undefined) {
    * @returns {IssueLite[]}
    */
   function selectBoardColumn(client_id, mode) {
-    const arr =
-      issue_stores && issue_stores.snapshotFor
+    if (!issue_stores) {
+      return [];
+    }
+    const has_read_snap = typeof issue_stores.readSnapshotFor === 'function';
+    const arr = has_read_snap
+      ? /** @type { { readSnapshotFor: (id: string) => readonly IssueLite[] } } */ (
+          issue_stores
+        )
+          .readSnapshotFor(client_id)
+          .slice()
+      : issue_stores.snapshotFor
         ? issue_stores.snapshotFor(client_id).slice()
         : [];
-    if (mode === 'in_progress') {
-      arr.sort(cmpPriorityThenCreated);
-    } else if (mode === 'closed') {
+    if (mode === 'closed') {
       arr.sort(cmpClosedDesc);
-    } else {
-      // ready/blocked share the same sort
+    } else if (!has_read_snap) {
+      // ready/blocked/in_progress share the same sort (already sorted when readSnapshotFor is used)
       arr.sort(cmpPriorityThenCreated);
     }
     return arr;
@@ -74,7 +89,11 @@ export function createListSelectors(issue_stores = undefined) {
    * @returns {IssueLite[]}
    */
   function selectBoardColumnUnion(client_ids, mode) {
-    if (!issue_stores || typeof issue_stores.snapshotFor !== 'function') {
+    if (
+      !issue_stores ||
+      (typeof issue_stores.snapshotFor !== 'function' &&
+        typeof issue_stores.readSnapshotFor !== 'function')
+    ) {
       return [];
     }
     /** @type {IssueLite[]} */
@@ -82,7 +101,13 @@ export function createListSelectors(issue_stores = undefined) {
     /** @type {Set<string>} */
     const seen = new Set();
     for (const client_id of Array.isArray(client_ids) ? client_ids : []) {
-      for (const it of issue_stores.snapshotFor(client_id) || []) {
+      const source =
+        typeof issue_stores.readSnapshotFor === 'function'
+          ? issue_stores.readSnapshotFor(client_id)
+          : issue_stores.snapshotFor
+            ? issue_stores.snapshotFor(client_id)
+            : [];
+      for (const it of source || []) {
         const id = String(it?.id ?? '');
         if (id.length === 0 || seen.has(id)) {
           continue;
@@ -108,13 +133,21 @@ export function createListSelectors(issue_stores = undefined) {
    * @returns {IssueLite[]}
    */
   function selectEpicChildren(epic_id) {
-    if (!issue_stores || typeof issue_stores.snapshotFor !== 'function') {
+    if (
+      !issue_stores ||
+      (typeof issue_stores.snapshotFor !== 'function' &&
+        typeof issue_stores.readSnapshotFor !== 'function')
+    ) {
       return [];
     }
     // Epic detail subscription uses client id `detail:<id>` and contains the
     // epic entity with a `dependents` array. Render children from that list.
     const arr = /** @type {any[]} */ (
-      issue_stores.snapshotFor(`detail:${epic_id}`) || []
+      typeof issue_stores.readSnapshotFor === 'function'
+        ? issue_stores.readSnapshotFor(`detail:${epic_id}`)
+        : issue_stores.snapshotFor
+          ? issue_stores.snapshotFor(`detail:${epic_id}`)
+          : []
     );
     const epic = arr.find((it) => String(it?.id || '') === String(epic_id));
     const dependents = Array.isArray(epic?.dependents) ? epic.dependents : [];
@@ -127,9 +160,17 @@ export function createListSelectors(issue_stores = undefined) {
    * Subscribe for re-render; triggers once per issues envelope.
    *
    * @param {() => void} fn
+   * @param {string | string[]} [client_ids]
    * @returns {() => void}
    */
-  function subscribe(fn) {
+  function subscribe(fn, client_ids = undefined) {
+    if (
+      client_ids &&
+      issue_stores &&
+      typeof issue_stores.subscribeKeys === 'function'
+    ) {
+      return issue_stores.subscribeKeys(client_ids, fn);
+    }
     if (issue_stores && typeof issue_stores.subscribe === 'function') {
       return issue_stores.subscribe(fn);
     }

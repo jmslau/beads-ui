@@ -3,7 +3,7 @@
  */
 import { html, nothing } from 'lit-html';
 import { formatDateShort, formatDateValue } from '../utils/date-format.js';
-import { createIssueIdRenderer } from '../utils/issue-id-renderer.js';
+import { renderIssueIdButton } from '../utils/issue-id-renderer.js';
 import { ISSUE_TYPES, typeLabel } from '../utils/issue-type.js';
 import { emojiForPriority } from '../utils/priority-badge.js';
 import { priority_levels } from '../utils/priority.js';
@@ -39,6 +39,77 @@ export const ISSUE_ROW_COLUMNS = [
   { key: 'updated_at', label: 'Updated', width: 130, sortable: true },
   { key: 'deps', label: 'Deps', width: 80 }
 ];
+
+/** @type {Map<string, import('lit-html').TemplateResult<1>[]>} */
+const type_options_cache = new Map();
+/** @type {Map<string, import('lit-html').TemplateResult<1>[]>} */
+const status_options_cache = new Map();
+/** @type {Map<string, import('lit-html').TemplateResult<1>[]>} */
+const priority_options_cache = new Map();
+
+/**
+ * Return cached `<option>` templates for the type `<select>`.
+ *
+ * @param {string} cur_type
+ * @returns {import('lit-html').TemplateResult<1>[]}
+ */
+function getTypeOptions(cur_type) {
+  let opts = type_options_cache.get(cur_type);
+  if (!opts) {
+    opts = ISSUE_TYPES.map(
+      (t) =>
+        html`<option value=${t} ?selected=${cur_type === t}>
+          ${typeLabel(t)}
+        </option>`
+    );
+    type_options_cache.set(cur_type, opts);
+  }
+  return opts;
+}
+
+/**
+ * Return cached `<option>` templates for the status `<select>`.
+ *
+ * @param {string} cur_status
+ * @returns {import('lit-html').TemplateResult<1>[]}
+ */
+function getStatusOptions(cur_status) {
+  let opts = status_options_cache.get(cur_status);
+  if (!opts) {
+    opts = statusOptions(cur_status).map(
+      (s) =>
+        html`<option
+          value=${s}
+          ?selected=${cur_status === s}
+          ?disabled=${!isSettableStatus(s)}
+        >
+          ${statusLabel(s)}
+        </option>`
+    );
+    status_options_cache.set(cur_status, opts);
+  }
+  return opts;
+}
+
+/**
+ * Return cached `<option>` templates for the priority `<select>`.
+ *
+ * @param {string} cur_prio
+ * @returns {import('lit-html').TemplateResult<1>[]}
+ */
+function getPriorityOptions(cur_prio) {
+  let opts = priority_options_cache.get(cur_prio);
+  if (!opts) {
+    opts = priority_levels.map(
+      (p, i) =>
+        html`<option value=${String(i)} ?selected=${cur_prio === String(i)}>
+          ${emojiForPriority(i)} ${p}
+        </option>`
+    );
+    priority_options_cache.set(cur_prio, opts);
+  }
+  return opts;
+}
 
 /**
  * Create a reusable issue row renderer used by list and epics views.
@@ -76,6 +147,75 @@ export function createIssueRowRenderer(options) {
 
   /** @type {Set<string>} */
   const editing = new Set();
+
+  /**
+   * @param {MouseEvent} e
+   */
+  const onEditableClick = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const el = /** @type {HTMLElement | null} */ (e.currentTarget);
+    const k = el ? el.getAttribute('data-edit-key') : null;
+    if (k) {
+      editing.add(k);
+      request_render();
+    }
+  };
+
+  /**
+   * @param {KeyboardEvent} e
+   */
+  const onEditableKeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      const el = /** @type {HTMLElement | null} */ (e.currentTarget);
+      const k = el ? el.getAttribute('data-edit-key') : null;
+      if (k) {
+        editing.add(k);
+        request_render();
+      }
+    }
+  };
+
+  /**
+   * @param {Event} ev
+   */
+  const onRowClickHandler = (ev) => {
+    const el = /** @type {HTMLElement | null} */ (ev.target);
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT')) {
+      return;
+    }
+    const tr = /** @type {HTMLElement | null} */ (ev.currentTarget);
+    const id = tr ? tr.getAttribute('data-issue-id') : null;
+    if (id) {
+      on_row_click(id, ev);
+    }
+  };
+
+  /**
+   * @param {'priority'|'status'|'issue_type'} key
+   * @returns {(ev: Event) => Promise<void>}
+   */
+  function makeSharedSelectChange(key) {
+    return async (ev) => {
+      const sel = /** @type {HTMLSelectElement} */ (ev.currentTarget);
+      const tr = sel ? sel.closest('tr') : null;
+      const id = tr ? tr.getAttribute('data-issue-id') : null;
+      if (!id) {
+        return;
+      }
+      const val = sel.value || '';
+      /** @type {{ [k: string]: any }} */
+      const patch = {};
+      patch[key] = key === 'priority' ? Number(val) : val;
+      await on_update(id, patch);
+    };
+  }
+
+  const onTypeChange = makeSharedSelectChange('issue_type');
+  const onStatusChange = makeSharedSelectChange('status');
+  const onPriorityChange = makeSharedSelectChange('priority');
 
   /**
    * @param {string} id
@@ -127,56 +267,11 @@ export function createIssueRowRenderer(options) {
       class="editable text-truncate ${value ? '' : 'muted'}"
       tabindex="0"
       role="button"
-      @click=${
-        /** @param {MouseEvent} e */ (e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          editing.add(k);
-          request_render();
-        }
-      }
-      @keydown=${
-        /** @param {KeyboardEvent} e */ (e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            e.stopPropagation();
-            editing.add(k);
-            request_render();
-          }
-        }
-      }
+      data-edit-key=${k}
+      @click=${onEditableClick}
+      @keydown=${onEditableKeydown}
       >${value || placeholder}</span
     >`;
-  }
-
-  /**
-   * @param {string} id
-   * @param {'priority'|'status'|'issue_type'} key
-   * @returns {(ev: Event) => Promise<void>}
-   */
-  function makeSelectChange(id, key) {
-    return async (ev) => {
-      const sel = /** @type {HTMLSelectElement} */ (ev.currentTarget);
-      const val = sel.value || '';
-      /** @type {{ [k:string]: any }} */
-      const patch = {};
-      patch[key] = key === 'priority' ? Number(val) : val;
-      await on_update(id, patch);
-    };
-  }
-
-  /**
-   * @param {string} id
-   * @returns {(ev: Event) => void}
-   */
-  function makeRowClick(id) {
-    return (/** @type {Event} */ ev) => {
-      const el = /** @type {HTMLElement|null} */ (ev.target);
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT')) {
-        return;
-      }
-      on_row_click(id, ev);
-    };
   }
 
   /**
@@ -194,23 +289,18 @@ export function createIssueRowRenderer(options) {
       class="${row_class} ${is_selected ? 'selected' : ''}"
       data-issue-id=${it.id}
       aria-expanded=${expanded === null ? nothing : String(expanded)}
-      @click=${makeRowClick(it.id)}
+      @click=${onRowClickHandler}
     >
       <td role="gridcell" class="mono">
-        ${leading_control(it)}${createIssueIdRenderer(it.id)}
+        ${leading_control(it)}${renderIssueIdButton(it.id)}
       </td>
       <td role="gridcell">
         <select
           class="badge-select badge--type type-badge--${cur_type || 'neutral'}"
           .value=${cur_type}
-          @change=${makeSelectChange(it.id, 'issue_type')}
+          @change=${onTypeChange}
         >
-          ${ISSUE_TYPES.map(
-            (t) =>
-              html`<option value=${t} ?selected=${cur_type === t}>
-                ${typeLabel(t)}
-              </option>`
-          )}
+          ${getTypeOptions(cur_type)}
         </select>
       </td>
       <td role="gridcell">
@@ -224,21 +314,9 @@ export function createIssueRowRenderer(options) {
         <select
           class="badge-select badge--status is-${cur_status}"
           .value=${cur_status}
-          @change=${makeSelectChange(it.id, 'status')}
+          @change=${onStatusChange}
         >
-          ${statusOptions(cur_status).map(
-            (s) =>
-              // An out-of-set current status (e.g. `pinned`) is shown so the
-              // select tells the truth, but disabled so it cannot be re-chosen:
-              // the server rejects `update-status pinned`.
-              html`<option
-                value=${s}
-                ?selected=${cur_status === s}
-                ?disabled=${!isSettableStatus(s)}
-              >
-                ${statusLabel(s)}
-              </option>`
-          )}
+          ${getStatusOptions(cur_status)}
         </select>
       </td>
       <td role="gridcell">
@@ -248,17 +326,9 @@ export function createIssueRowRenderer(options) {
         <select
           class="badge-select badge--priority ${'is-p' + cur_prio}"
           .value=${cur_prio}
-          @change=${makeSelectChange(it.id, 'priority')}
+          @change=${onPriorityChange}
         >
-          ${priority_levels.map(
-            (p, i) =>
-              html`<option
-                value=${String(i)}
-                ?selected=${cur_prio === String(i)}
-              >
-                ${emojiForPriority(i)} ${p}
-              </option>`
-          )}
+          ${getPriorityOptions(cur_prio)}
         </select>
       </td>
       <td

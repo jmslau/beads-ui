@@ -134,6 +134,28 @@ export class SubscriptionRegistry {
   constructor() {
     /** @type {Map<string, Entry>} */
     this._entries = new Map();
+    /** @type {number} */
+    this._dbRevision = 0;
+  }
+
+  /**
+   * Return the current database revision counter used to scope list caches.
+   *
+   * @returns {number}
+   */
+  getDbRevision() {
+    return this._dbRevision;
+  }
+
+  /**
+   * Increment and return the database revision counter when mutations or
+   * watcher events invalidate cached list results.
+   *
+   * @returns {number}
+   */
+  bumpDbRevision() {
+    this._dbRevision += 1;
+    return this._dbRevision;
   }
 
   /**
@@ -289,6 +311,7 @@ export class SubscriptionRegistry {
    * Does not close WebSocket connections; they will re-subscribe on refresh.
    */
   clear() {
+    this._dbRevision += 1;
     this._entries.clear();
   }
 }

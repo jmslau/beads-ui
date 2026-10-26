@@ -4,11 +4,11 @@
 import { html, render } from 'lit-html';
 import { createListSelectors } from '../data/list-selectors.js';
 import { cmpClosedDesc, cmpPriorityThenCreated } from '../data/sort.js';
-import { createIssueIdRenderer } from '../utils/issue-id-renderer.js';
+import { renderIssueIdButton } from '../utils/issue-id-renderer.js';
 import { debug } from '../utils/logging.js';
-import { createPriorityBadge } from '../utils/priority-badge.js';
+import { renderPriorityBadge } from '../utils/priority-badge.js';
 import { showToast } from '../utils/toast.js';
-import { createTypeBadge } from '../utils/type-badge.js';
+import { renderTypeBadge } from '../utils/type-badge.js';
 
 /**
  * @typedef {{
@@ -79,6 +79,47 @@ export function createBoardView(
   let list_closed_raw = [];
   // Centralized selection helpers
   const selectors = issueStores ? createListSelectors(issueStores) : null;
+  const INITIAL_CARD_LIMIT = 100;
+  const CARD_BATCH_SIZE = 100;
+  /** @type {Record<string, number>} */
+  const col_limits = {
+    'blocked-col': INITIAL_CARD_LIMIT,
+    'ready-col': INITIAL_CARD_LIMIT,
+    'in-progress-col': INITIAL_CARD_LIMIT,
+    'closed-col': INITIAL_CARD_LIMIT
+  };
+
+  /**
+   * Expand the rendered card limit for a board column when scrolled near the bottom.
+   *
+   * @param {Event} ev
+   */
+  function onColumnScroll(ev) {
+    const el = /** @type {HTMLElement | null} */ (ev.currentTarget);
+    if (!el || !el.id) {
+      return;
+    }
+    const col_id = el.id;
+    const items =
+      col_id === 'blocked-col'
+        ? list_blocked
+        : col_id === 'ready-col'
+          ? list_ready
+          : col_id === 'in-progress-col'
+            ? list_in_progress
+            : list_closed;
+    const current_limit = col_limits[col_id] || INITIAL_CARD_LIMIT;
+    if (current_limit >= items.length) {
+      return;
+    }
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 300) {
+      col_limits[col_id] = Math.min(
+        items.length,
+        current_limit + CARD_BATCH_SIZE
+      );
+      doRender();
+    }
+  }
 
   /**
    * Closed column filter mode.
@@ -120,8 +161,10 @@ export function createBoardView(
   function columnTemplate(title, id, items) {
     const item_count = Array.isArray(items) ? items.length : 0;
     const count_label = item_count === 1 ? '1 issue' : `${item_count} issues`;
+    const limit = col_limits[id] || INITIAL_CARD_LIMIT;
+    const visible_items = item_count > limit ? items.slice(0, limit) : items;
     return html`
-      <section class="board-column" id=${id}>
+      <section class="board-column" id=${id} @scroll=${onColumnScroll}>
         <header
           class="board-column__header"
           id=${id + '-header'}
@@ -163,7 +206,7 @@ export function createBoardView(
           role="list"
           aria-labelledby=${id + '-header'}
         >
-          ${items.map((it) => cardTemplate(it))}
+          ${visible_items.map((it, idx) => cardTemplate(it, title, idx === 0))}
         </div>
       </section>
     `;
@@ -171,25 +214,28 @@ export function createBoardView(
 
   /**
    * @param {IssueLite} it
+   * @param {string} col_title
+   * @param {boolean} is_first
    */
-  function cardTemplate(it) {
+  function cardTemplate(it, col_title, is_first) {
+    const card_title = it.title || '(no title)';
+    const aria_label = `Issue ${card_title} — Column ${col_title}`;
     return html`
       <article
         class="board-card"
         data-issue-id=${it.id}
         role="listitem"
-        tabindex="-1"
+        aria-label=${aria_label}
+        tabindex=${is_first ? '0' : '-1'}
         draggable="true"
-        @click=${(/** @type {MouseEvent} */ ev) => onCardClick(ev, it.id)}
-        @dragstart=${(/** @type {DragEvent} */ ev) => onDragStart(ev, it.id)}
+        @click=${onCardClick}
+        @dragstart=${onDragStart}
         @dragend=${onDragEnd}
       >
-        <div class="board-card__title text-truncate">
-          ${it.title || '(no title)'}
-        </div>
+        <div class="board-card__title text-truncate">${card_title}</div>
         <div class="board-card__meta">
-          ${createTypeBadge(it.issue_type)} ${createPriorityBadge(it.priority)}
-          ${createIssueIdRenderer(it.id, { class_name: 'mono' })}
+          ${renderTypeBadge(it.issue_type)} ${renderPriorityBadge(it.priority)}
+          ${renderIssueIdButton(it.id)}
         </div>
       </article>
     `;
@@ -202,12 +248,14 @@ export function createBoardView(
    * Handle card click, ignoring clicks during drag operations.
    *
    * @param {MouseEvent} ev
-   * @param {string} id
    */
-  function onCardClick(ev, id) {
-    // Only navigate if this wasn't a drag operation
+  function onCardClick(ev) {
     if (!dragging_id) {
-      gotoIssue(id);
+      const card = /** @type {HTMLElement | null} */ (ev.currentTarget);
+      const id = card ? card.getAttribute('data-issue-id') : null;
+      if (id) {
+        gotoIssue(id);
+      }
     }
   }
 
@@ -215,15 +263,15 @@ export function createBoardView(
    * Handle drag start: store issue id in dataTransfer and add dragging class.
    *
    * @param {DragEvent} ev
-   * @param {string} id
    */
-  function onDragStart(ev, id) {
+  function onDragStart(ev) {
+    const target = /** @type {HTMLElement} */ (ev.currentTarget || ev.target);
+    const id = target ? target.getAttribute('data-issue-id') || '' : '';
     dragging_id = id;
     if (ev.dataTransfer) {
       ev.dataTransfer.setData('text/plain', id);
       ev.dataTransfer.effectAllowed = 'move';
     }
-    const target = /** @type {HTMLElement} */ (ev.target);
     target.classList.add('board-card--dragging');
     log('dragstart %s', id);
   }
@@ -282,55 +330,6 @@ export function createBoardView(
 
   function doRender() {
     render(template(), mount_element);
-    postRenderEnhance();
-  }
-
-  /**
-   * Enhance rendered board with a11y and keyboard navigation.
-   * - Roving tabindex per column (first card tabbable).
-   * - ArrowUp/ArrowDown within column.
-   * - ArrowLeft/ArrowRight to adjacent non-empty column (focus top card).
-   * - Enter/Space to open details for focused card.
-   */
-  function postRenderEnhance() {
-    try {
-      /** @type {HTMLElement[]} */
-      const columns = Array.from(
-        mount_element.querySelectorAll('.board-column')
-      );
-      for (const col of columns) {
-        const body = /** @type {HTMLElement|null} */ (
-          col.querySelector('.board-column__body')
-        );
-        if (!body) {
-          continue;
-        }
-        /** @type {HTMLElement[]} */
-        const cards = Array.from(body.querySelectorAll('.board-card'));
-        // Assign aria-label using column header for screen readers
-        const header = /** @type {HTMLElement|null} */ (
-          col.querySelector('.board-column__header')
-        );
-        const col_name = header ? header.textContent?.trim() || '' : '';
-        for (const card of cards) {
-          const title_el = /** @type {HTMLElement|null} */ (
-            card.querySelector('.board-card__title')
-          );
-          const t = title_el ? title_el.textContent?.trim() || '' : '';
-          card.setAttribute(
-            'aria-label',
-            `Issue ${t || '(no title)'} — Column ${col_name}`
-          );
-          // Default roving setup
-          card.tabIndex = -1;
-        }
-        if (cards.length > 0) {
-          cards[0].tabIndex = 0;
-        }
-      }
-    } catch {
-      // non-fatal
-    }
   }
 
   // Delegate keyboard handling from mount_element
@@ -634,7 +633,13 @@ export function createBoardView(
       } catch {
         // ignore
       }
-    });
+    }, [
+      'tab:board:ready',
+      'tab:board:in-progress',
+      'tab:board:closed',
+      'tab:board:blocked',
+      'tab:board:status-blocked'
+    ]);
   }
 
   return {
