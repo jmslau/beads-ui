@@ -32,6 +32,31 @@ const SEARCH_LISTS = [
   }
 ];
 
+/** @type {WeakMap<object, { id: string, title: string, id_lower: string, title_lower: string }>} */
+const epic_search_lower_cache = new WeakMap();
+
+/**
+ * Return cached lowercase id and title strings for an issue/epic object.
+ *
+ * @param {{ id?: string, title?: string }} item
+ * @returns {{ id: string, title: string, id_lower: string, title_lower: string }}
+ */
+function getItemSearchLower(item) {
+  const id = String(item.id || '');
+  const title = String(item.title || '');
+  let cached = epic_search_lower_cache.get(item);
+  if (!cached || cached.id !== id || cached.title !== title) {
+    cached = {
+      id,
+      title,
+      id_lower: id.toLowerCase(),
+      title_lower: title.toLowerCase()
+    };
+    epic_search_lower_cache.set(item, cached);
+  }
+  return cached;
+}
+
 /**
  * Epics view (push-only):
  * - Derives epic groups from the local issues store (no RPC reads).
@@ -75,8 +100,60 @@ export function createEpicsView(
   /** @type {Map<string, () => Promise<void>>} */
   const search_unsubs = new Map();
   let search_loading = false;
+  const INITIAL_EPIC_ROW_BUDGET = 150;
+  const EPIC_ROW_BATCH_SIZE = 150;
+  let epic_row_budget = INITIAL_EPIC_ROW_BUDGET;
+  /** @type {Map<string, IssueLite[]> | null} */
+  let cached_children_by_parent = null;
+  /** @type {readonly any[] | null} */
+  let cached_search_snapshot_ref = null;
+  /** @type {Map<string, readonly any[]>} */
+  const last_epic_snap_refs = new Map();
   // Centralized selection helpers
   const selectors = issue_stores ? createListSelectors(issue_stores) : null;
+
+  /**
+   * Check whether any store relevant to the Epics view changed its snapshot reference.
+   *
+   * @returns {boolean}
+   */
+  function hasRelevantStoreChange() {
+    const read_snap =
+      issue_stores && /** @type {any} */ (issue_stores).readSnapshotFor;
+    if (typeof read_snap !== 'function') {
+      return true;
+    }
+    /** @type {string[]} */
+    const keys = ['tab:epics', 'epics:search-all'];
+    for (const id of expanded) {
+      keys.push(`detail:${id}`);
+    }
+    let changed = false;
+    for (const k of keys) {
+      const ref = read_snap(k);
+      if (last_epic_snap_refs.get(k) !== ref) {
+        last_epic_snap_refs.set(k, ref);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Expand the rendered child row budget when scrolling near the bottom of #epics-list.
+   *
+   * @param {Event} ev
+   */
+  function onEpicsScroll(ev) {
+    const el = /** @type {HTMLElement | null} */ (ev.currentTarget);
+    if (!el) {
+      return;
+    }
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) {
+      epic_row_budget += EPIC_ROW_BATCH_SIZE;
+      doRender();
+    }
+  }
 
   /**
    * Cycle the epic-level column header through ascending → descending → cleared.
@@ -128,6 +205,9 @@ export function createEpicsView(
   // Live re-render on pushes: recompute groups when stores change
   if (selectors) {
     selectors.subscribe(() => {
+      if (!hasRelevantStoreChange()) {
+        return;
+      }
       const had_none = groups.length === 0;
       groups = buildGroupsFromSnapshot();
       doRender();
@@ -196,6 +276,7 @@ export function createEpicsView(
   function onSearchInput(ev) {
     const input = /** @type {HTMLInputElement} */ (ev.currentTarget);
     search_text = input.value;
+    epic_row_budget = INITIAL_EPIC_ROW_BUDGET;
     try {
       window.localStorage.setItem('beads-ui.epics.search', search_text);
     } catch {
@@ -274,11 +355,24 @@ export function createEpicsView(
     if (!issue_stores || typeof issue_stores.snapshotFor !== 'function') {
       return by_parent;
     }
+    const read_snap = /** @type {any} */ (issue_stores).readSnapshotFor;
+    if (typeof read_snap === 'function' && SEARCH_LISTS.length === 1) {
+      const snap_ref = read_snap(SEARCH_LISTS[0].client_id);
+      if (
+        cached_children_by_parent !== null &&
+        cached_search_snapshot_ref === snap_ref
+      ) {
+        return cached_children_by_parent;
+      }
+      cached_search_snapshot_ref = snap_ref;
+    }
     /** @type {Set<string>} */
     const seen = new Set();
     for (const list of SEARCH_LISTS) {
       const items = /** @type {IssueLite[]} */ (
-        issue_stores.snapshotFor(list.client_id) || []
+        typeof read_snap === 'function'
+          ? read_snap(list.client_id) || []
+          : issue_stores.snapshotFor(list.client_id) || []
       );
       for (const it of items) {
         const parent = String(it.parent || '');
@@ -298,6 +392,9 @@ export function createEpicsView(
     for (const bucket of by_parent.values()) {
       bucket.sort(cmpPriorityThenCreated);
     }
+    if (typeof read_snap === 'function' && SEARCH_LISTS.length === 1) {
+      cached_children_by_parent = by_parent;
+    }
     return by_parent;
   }
 
@@ -308,9 +405,10 @@ export function createEpicsView(
    * @param {string} needle
    */
   function matchesNeedle(item, needle) {
-    const id = String(item.id || '').toLowerCase();
-    const title = String(item.title || '').toLowerCase();
-    return id.includes(needle) || title.includes(needle);
+    const lower = getItemSearchLower(item);
+    return (
+      lower.id_lower.includes(needle) || lower.title_lower.includes(needle)
+    );
   }
 
   /**
@@ -382,6 +480,7 @@ export function createEpicsView(
 
   function template() {
     const visible = sortEntries(visibleEntries());
+    let remaining_budget = epic_row_budget;
     return html`
       <div class="panel__header">
         <input
@@ -392,7 +491,7 @@ export function createEpicsView(
           .value=${search_text}
         />
       </div>
-      <div class="panel__body" id="epics-list">
+      <div class="panel__body" id="epics-list" @scroll=${onEpicsScroll}>
         ${visible.length === 0
           ? html`<div class="muted" style="padding:10px 12px;">
               ${emptyMessage()}
@@ -409,9 +508,19 @@ export function createEpicsView(
                   </tr>
                 </thead>
               </table>
-              ${visible.map((entry) =>
-                groupTemplate(entry.group, entry.children)
-              )}
+              ${visible.map((entry) => {
+                const max_rows = Math.max(5, remaining_budget);
+                const res = groupTemplate(
+                  entry.group,
+                  entry.children,
+                  max_rows
+                );
+                remaining_budget = Math.max(
+                  0,
+                  remaining_budget - res.rendered_count
+                );
+                return res.tpl;
+              })}
             </div>`}
       </div>
     `;
@@ -421,8 +530,13 @@ export function createEpicsView(
    * @param {any} g
    * @param {IssueLite[] | null} [search_children] - Rows to show while
    * searching; `null` renders the epic's own children on expand.
+   * @param {number} [max_rows]
    */
-  function groupTemplate(g, search_children = null) {
+  function groupTemplate(
+    g,
+    search_children = null,
+    max_rows = INITIAL_EPIC_ROW_BUDGET
+  ) {
     const epic = g.epic || {};
     const id = String(epic.id || '');
     // Search hits are always shown, expanded or not
@@ -441,6 +555,8 @@ export function createEpicsView(
           .slice()
           .sort(compareByKey(child_sort_state.key, child_sort_state.dir))
       : base_list;
+    const visible_list =
+      list.length > max_rows ? list.slice(0, max_rows) : list;
     const is_loading = search_children === null && loading.has(id);
     // The epic itself, rendered with the shared row renderer. Attach the group
     // counters so the title-cell progress meter can read them.
@@ -449,7 +565,7 @@ export function createEpicsView(
       total_children: g.total_children,
       closed_children: g.closed_children
     };
-    return html`
+    const tpl = html`
       <div class="epic-group" data-epic-id=${id}>
         <table class="table epic-parent-table">
           ${column_resizer.colgroup()}
@@ -474,13 +590,17 @@ export function createEpicsView(
                         </tr>
                       </thead>
                       <tbody>
-                        ${list.map((it) => renderRow(it))}
+                        ${visible_list.map((it) => renderRow(it))}
                       </tbody>
                     </table>`}
             </div>`
           : null}
       </div>
     `;
+    return {
+      tpl,
+      rendered_count: is_open && !is_loading ? visible_list.length : 0
+    };
   }
 
   /**

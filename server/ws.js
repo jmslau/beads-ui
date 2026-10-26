@@ -44,6 +44,27 @@ let REFRESH_DEBOUNCE_MS = 75;
  */
 /** @type {MutationGate | null} */
 let MUTATION_GATE = null;
+let active_mutation_depth = 0;
+let watcher_fired_in_mutation = false;
+
+/**
+ * Mark the start of a mutating WebSocket request handler.
+ */
+function beginMutation() {
+  active_mutation_depth += 1;
+  registry.bumpDbRevision();
+}
+
+/**
+ * Mark the end of a mutating WebSocket request handler.
+ */
+function endMutation() {
+  active_mutation_depth = Math.max(0, active_mutation_depth - 1);
+  if (active_mutation_depth === 0 && watcher_fired_in_mutation) {
+    watcher_fired_in_mutation = false;
+    scheduleListRefresh();
+  }
+}
 
 /**
  * Start a mutation window gate if not already active. The gate resolves on the
@@ -56,7 +77,15 @@ let MUTATION_GATE = null;
  * @param {number} [timeout_ms]
  */
 function triggerMutationRefreshOnce(timeout_ms = 500) {
+  if (REFRESH_TIMER) {
+    clearTimeout(REFRESH_TIMER);
+    REFRESH_TIMER = null;
+  }
   if (MUTATION_GATE) {
+    if (watcher_fired_in_mutation) {
+      watcher_fired_in_mutation = false;
+      MUTATION_GATE.resolve('watcher');
+    }
     return;
   }
   /** @type {(r: 'watcher'|'timeout') => void} */
@@ -86,6 +115,11 @@ function triggerMutationRefreshOnce(timeout_ms = 500) {
     }, timeout_ms)
   };
   MUTATION_GATE.timer.unref?.();
+
+  if (watcher_fired_in_mutation) {
+    watcher_fired_in_mutation = false;
+    MUTATION_GATE.resolve('watcher');
+  }
 
   // After resolution, run a single refresh across active subs and clear gate
   void p.then(async () => {
@@ -143,6 +177,7 @@ function collectActiveListSpecs() {
  * Run refresh for all active list subscription specs and publish deltas.
  */
 async function refreshAllActiveListSubscriptions() {
+  registry.bumpDbRevision();
   const specs = collectActiveListSpecs();
   // Run refreshes concurrently; locking is handled per key in the registry
   await Promise.all(
@@ -160,6 +195,15 @@ async function refreshAllActiveListSubscriptions() {
  * Schedule a coalesced refresh of all active list subscriptions.
  */
 export function scheduleListRefresh() {
+  registry.bumpDbRevision();
+  if (active_mutation_depth > 0) {
+    watcher_fired_in_mutation = true;
+    if (REFRESH_TIMER) {
+      clearTimeout(REFRESH_TIMER);
+      REFRESH_TIMER = null;
+    }
+    return;
+  }
   // Suppress watcher-driven refreshes during an active mutation gate; resolve gate once
   if (MUTATION_GATE) {
     try {
@@ -355,6 +399,14 @@ async function refreshAndPublish(spec) {
     const delta = registry.applyItems(key, items);
     const entry = registry.get(key);
     if (!entry || entry.subscribers.size === 0) {
+      return;
+    }
+    if (
+      prev_size > 0 &&
+      delta.added.length === 0 &&
+      delta.updated.length === 0 &&
+      delta.removed.length === 0
+    ) {
       return;
     }
     /** @type {Map<string, any>} */
@@ -567,6 +619,22 @@ export function attachWsServer(http_server, options = {}) {
   };
 }
 
+/** @type {Set<string>} */
+const MUTATION_MESSAGE_TYPES = new Set([
+  'update-assignee',
+  'update-status',
+  'update-priority',
+  'update-type',
+  'edit-text',
+  'create-issue',
+  'dep-add',
+  'dep-remove',
+  'label-add',
+  'label-remove',
+  'add-comment',
+  'delete-issue'
+]);
+
 /**
  * Handle an incoming message frame and respond to the same socket.
  *
@@ -602,7 +670,26 @@ export async function handleMessage(ws, data) {
   }
 
   const req = json;
+  const is_mutation = MUTATION_MESSAGE_TYPES.has(String(req.type));
+  if (is_mutation) {
+    beginMutation();
+  }
+  try {
+    await handleValidatedRequest(ws, req);
+  } finally {
+    if (is_mutation) {
+      endMutation();
+    }
+  }
+}
 
+/**
+ * Dispatch a validated request envelope on the socket.
+ *
+ * @param {WebSocket} ws
+ * @param {import('../app/protocol.js').RequestEnvelope} req
+ */
+async function handleValidatedRequest(ws, req) {
   // Pin every bd invocation made during this message to the active workspace.
   // Without this, runBd/runBdJson fall back to process.cwd() and bd reports
   // "no beads database found" for any workspace selected via set-workspace.

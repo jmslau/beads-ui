@@ -1,7 +1,192 @@
 import { runBdJson } from './bd.js';
 import { debug } from './logging.js';
+import { registry } from './subscriptions.js';
 
 const log = debug('list-adapters');
+
+const LIST_CACHE_TTL_MS = 15000;
+
+/** @type {Set<string>} */
+const SHARED_LIST_TYPES = new Set([
+  'all-issues',
+  'all-issues-including-closed',
+  'in-progress-issues',
+  'closed-issues',
+  'status-blocked-issues'
+]);
+
+/**
+ * @typedef {Object} SharedAllCacheEntry
+ * @property {string} cwd
+ * @property {number} revision
+ * @property {number} ts
+ * @property {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} all_items
+ * @property {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} open_items
+ * @property {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} in_progress_items
+ * @property {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} closed_items
+ * @property {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} blocked_items
+ * @property {Map<string, { id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} by_id
+ */
+
+/** @type {SharedAllCacheEntry | null} */
+let shared_all_cache = null;
+/** @type {{ key: string, promise: Promise<FetchListResultSuccess | FetchListResultFailure> } | null} */
+let shared_all_inflight = null;
+
+/**
+ * @type {Map<string, { revision: number, ts: number, result: FetchListResultSuccess }>}
+ */
+const spec_result_cache = new Map();
+
+/**
+ * Check whether `runBdJson` is mocked (e.g. in unit tests).
+ *
+ * @returns {boolean}
+ */
+function isBdMocked() {
+  return Boolean(runBdJson && 'mock' in runBdJson);
+}
+
+/**
+ * Select the subset of items corresponding to a `bd list` subscription type.
+ *
+ * @param {string} type
+ * @param {SharedAllCacheEntry} entry
+ * @returns {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>}
+ */
+function selectFromSharedEntry(type, entry) {
+  if (type === 'all-issues-including-closed') {
+    return entry.all_items;
+  }
+  if (type === 'in-progress-issues') {
+    return entry.in_progress_items;
+  }
+  if (type === 'closed-issues') {
+    return entry.closed_items;
+  }
+  if (type === 'status-blocked-issues') {
+    return entry.blocked_items;
+  }
+  return entry.open_items;
+}
+
+/**
+ * Fetch and cache the full `--all` issue list for the current workspace and DB revision,
+ * coalescing concurrent requests across `bd list` subscription types.
+ *
+ * @param {string} spec_type
+ * @param {{ cwd?: string }} options
+ * @returns {Promise<FetchListResultSuccess | FetchListResultFailure>}
+ */
+async function fetchSharedListForType(spec_type, options) {
+  const cwd = options.cwd || process.cwd();
+  const rev = registry.getDbRevision();
+  const now = Date.now();
+
+  if (
+    shared_all_cache &&
+    shared_all_cache.cwd === cwd &&
+    shared_all_cache.revision === rev &&
+    now - shared_all_cache.ts <= LIST_CACHE_TTL_MS
+  ) {
+    return {
+      ok: true,
+      items: selectFromSharedEntry(spec_type, shared_all_cache)
+    };
+  }
+
+  const inflight_key = `${cwd}::${rev}`;
+  if (!shared_all_inflight || shared_all_inflight.key !== inflight_key) {
+    const args = ['list', '--json', '--tree=false', '--all', '--limit', '0'];
+    const promise = (async () => {
+      try {
+        const res = await runBdJson(args, { cwd: options.cwd });
+        if (!res || res.code !== 0 || !('stdoutJson' in res)) {
+          return /** @type {FetchListResultFailure} */ ({
+            ok: false,
+            error: {
+              code: 'bd_error',
+              message: String(res?.stderr || 'bd failed'),
+              details: { exit_code: res?.code ?? -1 }
+            }
+          });
+        }
+        const raw = Array.isArray(res.stdoutJson)
+          ? res.stdoutJson
+          : res.stdoutJson && typeof res.stdoutJson === 'object'
+            ? [res.stdoutJson]
+            : [];
+        const all_items = normalizeIssueList(raw);
+        /** @type {typeof all_items} */
+        const open_items = [];
+        /** @type {typeof all_items} */
+        const in_progress_items = [];
+        /** @type {typeof all_items} */
+        const closed_items = [];
+        /** @type {typeof all_items} */
+        const blocked_items = [];
+        /** @type {Map<string, (typeof all_items)[number]>} */
+        const by_id = new Map();
+        for (const it of all_items) {
+          by_id.set(it.id, it);
+          const st = String(it.status || '');
+          if (st === 'closed') {
+            closed_items.push(it);
+          } else {
+            open_items.push(it);
+            if (st === 'in_progress') {
+              in_progress_items.push(it);
+            } else if (st === 'blocked') {
+              blocked_items.push(it);
+            }
+          }
+        }
+        shared_all_cache = {
+          cwd,
+          revision: rev,
+          ts: Date.now(),
+          all_items,
+          open_items,
+          in_progress_items,
+          closed_items,
+          blocked_items,
+          by_id
+        };
+        return /** @type {FetchListResultSuccess} */ ({
+          ok: true,
+          items: all_items
+        });
+      } catch (err) {
+        return /** @type {FetchListResultFailure} */ ({
+          ok: false,
+          error: {
+            code: 'bd_error',
+            message:
+              (err && /** @type {any} */ (err).message) ||
+              'bd invocation failed'
+          }
+        });
+      } finally {
+        if (shared_all_inflight && shared_all_inflight.key === inflight_key) {
+          shared_all_inflight = null;
+        }
+      }
+    })();
+    shared_all_inflight = { key: inflight_key, promise };
+  }
+
+  const base_res = await shared_all_inflight.promise;
+  if (!base_res.ok) {
+    return base_res;
+  }
+  if (shared_all_cache && shared_all_cache.cwd === cwd) {
+    return {
+      ok: true,
+      items: selectFromSharedEntry(spec_type, shared_all_cache)
+    };
+  }
+  return base_res;
+}
 
 /**
  * Build concrete `bd` CLI args for a subscription type + params.
@@ -161,6 +346,31 @@ export async function fetchListForSubscription(spec, options = {}) {
     return { ok: false, error: e };
   }
 
+  const spec_type = String(spec.type);
+  if (!isBdMocked() && SHARED_LIST_TYPES.has(spec_type)) {
+    return fetchSharedListForType(spec_type, options);
+  }
+
+  const cwd = options.cwd || process.cwd();
+  const rev = registry.getDbRevision();
+  const cacheable_non_list =
+    !isBdMocked() &&
+    (spec_type === 'ready-issues' ||
+      spec_type === 'blocked-issues' ||
+      spec_type === 'epics');
+  const spec_cache_key = `${cwd}::${spec_type}`;
+
+  if (cacheable_non_list) {
+    const cached = spec_result_cache.get(spec_cache_key);
+    if (
+      cached &&
+      cached.revision === rev &&
+      Date.now() - cached.ts <= LIST_CACHE_TTL_MS
+    ) {
+      return cached.result;
+    }
+  }
+
   try {
     const res = await runBdJson(args, { cwd: options.cwd });
     if (!res || res.code !== 0 || !('stdoutJson' in res)) {
@@ -256,7 +466,19 @@ export async function fetchListForSubscription(spec, options = {}) {
     }
 
     const items = normalizeIssueList(raw);
-    return { ok: true, items };
+    /** @type {FetchListResultSuccess} */
+    const ok_res = { ok: true, items };
+    if (cacheable_non_list) {
+      if (spec_result_cache.size > 50) {
+        spec_result_cache.clear();
+      }
+      spec_result_cache.set(spec_cache_key, {
+        revision: rev,
+        ts: Date.now(),
+        result: ok_res
+      });
+    }
+    return ok_res;
   } catch (err) {
     log('bd invocation failed for %o (args=%o): %o', spec, args, err);
     return {
@@ -319,6 +541,42 @@ async function enrichEpicDependents(epic, id, options = {}) {
   const dependents = Array.isArray(epic.dependents) ? epic.dependents : [];
   if (id.length === 0 || dependents.length === 0) {
     return epic;
+  }
+  if (!isBdMocked() && shared_all_cache) {
+    const cwd = options.cwd || process.cwd();
+    const rev = registry.getDbRevision();
+    if (
+      shared_all_cache.cwd === cwd &&
+      shared_all_cache.revision === rev &&
+      Date.now() - shared_all_cache.ts <= LIST_CACHE_TTL_MS
+    ) {
+      const cached_by_id = shared_all_cache.by_id;
+      let all_found = true;
+      for (const d of dependents) {
+        const did = String((d && /** @type {any} */ (d).id) ?? '');
+        if (!did || !cached_by_id.has(did)) {
+          all_found = false;
+          break;
+        }
+      }
+      if (all_found) {
+        const patched_from_cache = dependents.map((d) => {
+          const child = cached_by_id.get(
+            String((d && /** @type {any} */ (d).id) ?? '')
+          );
+          if (!child) {
+            return d;
+          }
+          return {
+            .../** @type {any} */ (d),
+            created_at: child.created_at,
+            updated_at: child.updated_at,
+            closed_at: child.closed_at
+          };
+        });
+        return { ...epic, dependents: patched_from_cache };
+      }
+    }
   }
   /** @type {{ code: number, stdoutJson?: unknown }} */
   let res;

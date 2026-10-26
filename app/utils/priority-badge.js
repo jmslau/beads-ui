@@ -1,4 +1,24 @@
+import { html } from 'lit-html';
 import { priority_levels } from './priority.js';
+
+/**
+ * Render a lit-html badge for a priority value (0..4).
+ *
+ * @param {number | null | undefined} priority
+ * @returns {import('lit-html').TemplateResult<1>}
+ */
+export function renderPriorityBadge(priority) {
+  const p = typeof priority === 'number' ? priority : 2;
+  const clamped = Math.max(0, Math.min(4, p));
+  const label = labelForPriority(p);
+  return html`<span
+    class=${`priority-badge is-p${clamped}`}
+    role="img"
+    title=${label}
+    aria-label=${`Priority: ${label}`}
+    >${`${emojiForPriority(p)} ${label}`}</span
+  >`;
+}
 
 /**
  * Create a colored badge for a priority value (0..4).

@@ -42,6 +42,12 @@ export interface SubscriptionIssueStore {
   size(): number;
   getById(id: string): Issue | undefined;
 
+  /**
+   * Optional helper to pre-populate initial items before the first snapshot arrives
+   * (e.g. when transitioning between all-issues and all-issues-including-closed).
+   */
+  seedInitialItems?(items: readonly Issue[]): void;
+
   /** Release references and listeners when the owning view unmounts. */
   dispose(): void;
 }

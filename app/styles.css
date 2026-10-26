@@ -1409,6 +1409,10 @@ input.inline-edit:focus {
   td.col-spacer {
     padding: 0;
   }
+  tbody tr {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 37px;
+  }
 }
 /* Sortable column headers: the label is a button so it is keyboard-focusable.
    The resize handle sits alongside it, so the button is inset from the right. */
@@ -1550,6 +1554,8 @@ body.is-col-resizing {
   gap: var(--space-7);
 }
 .board-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 76px;
   /* UI-76: remove borders and match page body background */
   border: none;
   border-radius: 6px;

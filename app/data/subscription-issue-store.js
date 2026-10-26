@@ -97,6 +97,7 @@ export function createSubscriptionIssueStore(id, options = {}) {
         const existing = items_by_id.get(it.id);
         if (!existing) {
           items_by_id.set(it.id, it);
+          rebuildOrdered();
         } else {
           // Guard with updated_at; prefer newer
           const prev_ts = Number.isFinite(existing.updated_at)
@@ -106,6 +107,8 @@ export function createSubscriptionIssueStore(id, options = {}) {
             ? /** @type {number} */ (it.updated_at)
             : 0;
           if (prev_ts <= next_ts) {
+            const prev_prio = existing.priority;
+            const prev_created = existing.created_at;
             const has_incoming_comments = hasOwn(it, 'comments');
             const preserve_comments =
               !has_incoming_comments && hasOwn(existing, 'comments');
@@ -126,19 +129,26 @@ export function createSubscriptionIssueStore(id, options = {}) {
             if (preserve_comments) {
               existing.comments = previous_comments;
             }
+            if (
+              !options.sort &&
+              existing.priority === prev_prio &&
+              existing.created_at === prev_created
+            ) {
+              ordered = ordered.slice();
+            } else {
+              rebuildOrdered();
+            }
           } else {
             // stale by timestamp; ignore
           }
         }
-        rebuildOrdered();
       }
       last_revision = rev;
       emit();
     } else if (msg.type === 'delete') {
       const rid = String(msg.issue_id || '');
-      if (rid) {
-        items_by_id.delete(rid);
-        rebuildOrdered();
+      if (rid && items_by_id.delete(rid)) {
+        ordered = ordered.filter((item) => item.id !== rid);
       }
       last_revision = rev;
       emit();
@@ -157,6 +167,26 @@ export function createSubscriptionIssueStore(id, options = {}) {
       };
     },
     applyPush,
+    /**
+     * Seed initial items without incrementing revision so the store can
+     * immediately render previous items while awaiting the first snapshot
+     * of a new subscription spec (even if its revision is 1).
+     *
+     * @param {any[]} items
+     */
+    seedInitialItems(items) {
+      if (is_disposed || last_revision > 0) {
+        return;
+      }
+      items_by_id.clear();
+      const list = Array.isArray(items) ? items : [];
+      for (const it of list) {
+        if (it && typeof it.id === 'string' && it.id.length > 0) {
+          items_by_id.set(it.id, it);
+        }
+      }
+      rebuildOrdered();
+    },
     snapshot() {
       // Return as read-only view; callers must not mutate
       return ordered;

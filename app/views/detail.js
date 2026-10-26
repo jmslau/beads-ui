@@ -250,6 +250,9 @@ export function createDetailView(
   /**
    * Refresh current from subscription store snapshot if available.
    */
+  /** @type {readonly any[] | null} */
+  let last_detail_snapshot_ref = null;
+
   function refreshFromStore() {
     if (
       !current_id ||
@@ -258,9 +261,15 @@ export function createDetailView(
     ) {
       return;
     }
+    const read_snap = /** @type {any} */ (issue_stores).readSnapshotFor;
     const arr = /** @type {IssueDetail[]} */ (
-      issue_stores.snapshotFor(`detail:${current_id}`)
+      typeof read_snap === 'function'
+        ? read_snap(`detail:${current_id}`)
+        : issue_stores.snapshotFor(`detail:${current_id}`)
     );
+    if (typeof read_snap === 'function') {
+      last_detail_snapshot_ref = arr;
+    }
     if (Array.isArray(arr) && arr.length > 0) {
       // First item is the issue for this subscription
       const found =
@@ -362,7 +371,17 @@ export function createDetailView(
   // Live updates: re-render when issue stores change
   if (issue_stores && typeof issue_stores.subscribe === 'function') {
     issue_stores.subscribe(() => {
+      if (!current_id) {
+        return;
+      }
       try {
+        const read_snap = /** @type {any} */ (issue_stores).readSnapshotFor;
+        if (typeof read_snap === 'function') {
+          const next_ref = read_snap(`detail:${current_id}`);
+          if (next_ref === last_detail_snapshot_ref) {
+            return;
+          }
+        }
         refreshFromStore();
         doRender();
         void ensureCommentsLoaded(current_id);

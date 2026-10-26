@@ -38,6 +38,31 @@ import { ISSUE_ROW_COLUMNS, createIssueRowRenderer } from './issue-row.js';
  * @param {{ snapshotFor?: (client_id: string) => any[], subscribe?: (fn: () => void) => () => void }} [issueStores]
  * @returns {{ load: () => Promise<void>, destroy: () => void }} View API.
  */
+/** @type {WeakMap<object, { id: string, title: string, id_lower: string, title_lower: string }>} */
+const search_lower_cache = new WeakMap();
+
+/**
+ * Return cached lowercase id and title strings for an issue object.
+ *
+ * @param {Issue} it
+ * @returns {{ id: string, title: string, id_lower: string, title_lower: string }}
+ */
+function getSearchLower(it) {
+  const id = String(it.id || '');
+  const title = String(it.title || '');
+  let cached = search_lower_cache.get(it);
+  if (!cached || cached.id !== id || cached.title !== title) {
+    cached = {
+      id,
+      title,
+      id_lower: id.toLowerCase(),
+      title_lower: title.toLowerCase()
+    };
+    search_lower_cache.set(it, cached);
+  }
+  return cached;
+}
+
 /**
  * Create the Issues List view.
  *
@@ -76,6 +101,46 @@ export function createListView(
   let type_dropdown_open = false;
   /** @type {SortState} */
   let sort_state = { key: null, dir: 'asc' };
+  let render_seq = 0;
+
+  const INITIAL_ROW_LIMIT = 150;
+  const ROW_BATCH_SIZE = 150;
+  let visible_limit = INITIAL_ROW_LIMIT;
+
+  /** @type {Issue[] | null} */
+  let memo_issues_ref = null;
+  /** @type {StatusFilter[] | null} */
+  let memo_status_ref = null;
+  /** @type {string} */
+  let memo_search = '';
+  /** @type {string[] | null} */
+  let memo_type_ref = null;
+  /** @type {string | null} */
+  let memo_sort_key = null;
+  /** @type {'asc' | 'desc'} */
+  let memo_sort_dir = 'asc';
+  /** @type {Issue[]} */
+  let memo_filtered = [];
+
+  /**
+   * Expand the rendered row window when the user scrolls near the bottom of #list-root.
+   *
+   * @param {Event} ev
+   */
+  const onListScroll = (ev) => {
+    const el = /** @type {HTMLElement | null} */ (ev.currentTarget);
+    if (!el) {
+      return;
+    }
+    const filtered = getFilteredIssues();
+    if (visible_limit >= filtered.length) {
+      return;
+    }
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) {
+      visible_limit = Math.min(filtered.length, visible_limit + ROW_BATCH_SIZE);
+      doRender();
+    }
+  };
 
   /**
    * Cycle a column header through ascending → descending → cleared.
@@ -177,10 +242,13 @@ export function createListView(
     const input = /** @type {HTMLInputElement} */ (ev.currentTarget);
     search_text = input.value;
     log('search input %s', search_text);
+    const prev_seq = render_seq;
     if (store) {
       store.setState({ filters: { search: search_text } });
     }
-    doRender();
+    if (render_seq === prev_seq) {
+      doRender();
+    }
   };
 
   /**
@@ -195,10 +263,13 @@ export function createListView(
       type_filters = [...type_filters, type];
     }
     log('type toggle %s -> %o', type, type_filters);
+    const prev_seq = render_seq;
     if (store) {
       store.setState({ filters: { type: type_filters } });
     }
-    doRender();
+    if (render_seq === prev_seq) {
+      doRender();
+    }
   };
 
   /**
@@ -253,14 +324,23 @@ export function createListView(
   const selectors = issue_stores ? createListSelectors(issue_stores) : null;
 
   /**
-   * Build lit-html template for the list view.
+   * Compute or return memoized filtered and sorted issues list.
+   *
+   * @returns {Issue[]}
    */
-  function template() {
-    // `ready` is a server-side membership, never a row predicate; every other
-    // entry narrows the rows as a union.
-    const is_ready_scope = status_filters.includes('ready');
-    const stored_status_filters = status_filters.filter((s) => s !== 'ready');
+  function getFilteredIssues() {
+    if (
+      memo_issues_ref === issues_cache &&
+      memo_status_ref === status_filters &&
+      memo_search === search_text &&
+      memo_type_ref === type_filters &&
+      memo_sort_key === sort_state.key &&
+      memo_sort_dir === sort_state.dir
+    ) {
+      return memo_filtered;
+    }
 
+    const stored_status_filters = status_filters.filter((s) => s !== 'ready');
     let filtered = issues_cache;
     if (stored_status_filters.length > 0) {
       filtered = filtered.filter((it) =>
@@ -272,9 +352,10 @@ export function createListView(
     if (search_text) {
       const needle = search_text.toLowerCase();
       filtered = filtered.filter((it) => {
-        const a = String(it.id).toLowerCase();
-        const b = String(it.title || '').toLowerCase();
-        return a.includes(needle) || b.includes(needle);
+        const lower = getSearchLower(it);
+        return (
+          lower.id_lower.includes(needle) || lower.title_lower.includes(needle)
+        );
       });
     }
     if (type_filters.length > 0) {
@@ -295,6 +376,39 @@ export function createListView(
     ) {
       filtered = filtered.slice().sort(cmpClosedDesc);
     }
+
+    const filter_or_sort_changed =
+      memo_status_ref !== status_filters ||
+      memo_search !== search_text ||
+      memo_type_ref !== type_filters ||
+      memo_sort_key !== sort_state.key ||
+      memo_sort_dir !== sort_state.dir;
+    if (filter_or_sort_changed) {
+      visible_limit = INITIAL_ROW_LIMIT;
+    }
+
+    memo_issues_ref = issues_cache;
+    memo_status_ref = status_filters;
+    memo_search = search_text;
+    memo_type_ref = type_filters;
+    memo_sort_key = sort_state.key;
+    memo_sort_dir = sort_state.dir;
+    memo_filtered = filtered;
+    return filtered;
+  }
+
+  /**
+   * Build lit-html template for the list view.
+   */
+  function template() {
+    // `ready` is a server-side membership, never a row predicate; every other
+    // entry narrows the rows as a union.
+    const is_ready_scope = status_filters.includes('ready');
+    const filtered = getFilteredIssues();
+    const visible_rows =
+      filtered.length > visible_limit
+        ? filtered.slice(0, visible_limit)
+        : filtered;
 
     return html`
       <div class="panel__header">
@@ -387,7 +501,7 @@ export function createListView(
           .value=${search_text}
         />
       </div>
-      <div class="panel__body" id="list-root">
+      <div class="panel__body" id="list-root" @scroll=${onListScroll}>
         ${filtered.length === 0
           ? html`<div class="issues-block">
               <div class="muted" style="padding:10px 12px;">No issues</div>
@@ -406,7 +520,7 @@ export function createListView(
                   </tr>
                 </thead>
                 <tbody role="rowgroup">
-                  ${filtered.map((it) => row_renderer(it))}
+                  ${visible_rows.map((it) => row_renderer(it))}
                 </tbody>
               </table>
             </div>`}
@@ -418,6 +532,7 @@ export function createListView(
    * Render the current issues_cache with filters applied.
    */
   function doRender() {
+    render_seq += 1;
     render(template(), mount_element);
   }
 
@@ -520,15 +635,13 @@ export function createListView(
             const tbody = /** @type {HTMLTableSectionElement|null} */ (
               row.parentElement
             );
-            if (tbody && tbody.querySelectorAll) {
-              const rows = Array.from(tbody.querySelectorAll('tr'));
-              const row_idx = Math.max(0, rows.indexOf(row));
+            if (tbody) {
               const col_idx = cell.cellIndex || 0;
-              const next_idx =
+              const next_row = /** @type {HTMLTableRowElement | null} */ (
                 ev.key === 'ArrowDown'
-                  ? Math.min(row_idx + 1, rows.length - 1)
-                  : Math.max(row_idx - 1, 0);
-              const next_row = rows[next_idx];
+                  ? row.nextElementSibling || row
+                  : row.previousElementSibling || row
+              );
               const next_cell =
                 next_row && next_row.cells ? next_row.cells[col_idx] : null;
               if (next_cell) {
@@ -549,48 +662,51 @@ export function createListView(
       }
     }
 
-    const tbody = /** @type {HTMLTableSectionElement|null} */ (
-      mount_element.querySelector('#list-root tbody')
-    );
-    const items = tbody ? tbody.querySelectorAll('tr') : [];
-    if (items.length === 0) {
+    const filtered = getFilteredIssues();
+    if (filtered.length === 0) {
       return;
     }
     let idx = 0;
     if (selected_id) {
-      const arr = Array.from(items);
-      idx = arr.findIndex((el) => {
-        const did = el.getAttribute('data-issue-id') || '';
-        return did === selected_id;
-      });
+      idx = filtered.findIndex((it) => String(it.id) === selected_id);
       if (idx < 0) {
         idx = 0;
       }
     }
     if (ev.key === 'ArrowDown') {
       ev.preventDefault();
-      const next = items[Math.min(idx + 1, items.length - 1)];
-      const next_id = next ? next.getAttribute('data-issue-id') : '';
+      const next_idx = Math.min(idx + 1, filtered.length - 1);
+      if (next_idx >= visible_limit) {
+        visible_limit = Math.min(filtered.length, next_idx + ROW_BATCH_SIZE);
+      }
+      const next = filtered[next_idx];
+      const next_id = next ? String(next.id || '') : '';
       const set = next_id ? next_id : null;
+      selected_id = set;
+      const prev_seq = render_seq;
       if (store && set) {
         store.setState({ selected_id: set });
       }
-      selected_id = set;
-      doRender();
+      if (render_seq === prev_seq) {
+        doRender();
+      }
     } else if (ev.key === 'ArrowUp') {
       ev.preventDefault();
-      const prev = items[Math.max(idx - 1, 0)];
-      const prev_id = prev ? prev.getAttribute('data-issue-id') : '';
+      const prev = filtered[Math.max(idx - 1, 0)];
+      const prev_id = prev ? String(prev.id || '') : '';
       const set = prev_id ? prev_id : null;
+      selected_id = set;
+      const prev_seq = render_seq;
       if (store && set) {
         store.setState({ selected_id: set });
       }
-      selected_id = set;
-      doRender();
+      if (render_seq === prev_seq) {
+        doRender();
+      }
     } else if (ev.key === 'Enter') {
       ev.preventDefault();
-      const current = items[idx];
-      const id = current ? current.getAttribute('data-issue-id') : '';
+      const current = filtered[idx];
+      const id = current ? String(current.id || '') : '';
       if (id) {
         const nav = navigateFn || ((h) => (window.location.hash = h));
         /** @type {'issues'|'epics'|'board'} */
@@ -662,7 +778,7 @@ export function createListView(
       } catch {
         // ignore
       }
-    });
+    }, 'tab:issues');
   }
 
   return {
